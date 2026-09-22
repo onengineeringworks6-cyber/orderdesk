@@ -1,13 +1,15 @@
 {
-  "rewrites": [
-    { "source": "/login", "destination": "/index.js" },
-    { "source": "/signup", "destination": "/index.js" },
-    { "source": "/neworder", "destination": "/index.js" },
-    { "source": "/orders", "destination": "/index.js" },
-    { "source": "/orders/:id/status", "destination": "/index.js" },
-    { "source": "/newclient", "destination": "/index.js" },
-    { "source": "/allclients", "destination": "/index.js" },
-    { "source": "/addproduct", "destination": "/index.js" },
-    { "source": "/products", "destination": "/index.js" }
+  "version": 2,
+  "builds": [
+    {
+      "src": "index.js",
+      "use": "@vercel/node"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "index.js"
+    }
   ]
 }
