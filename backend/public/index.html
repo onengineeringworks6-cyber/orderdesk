@@ -1,0 +1,803 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Order Desk</title>
+
+<!-- PWA -->
+<link rel="manifest" href="/manifest.json">
+<meta name="theme-color" content="#0b0f0d">
+<link rel="icon" href="/icons/icon-192.png" type="image/png">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Order Desk">
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --black: #0b0f0d;
+    --black-2: #141a17;
+    --ink: #101613;
+    --white: #ffffff;
+    --bg: #f2f5f3;
+    --line: #e1e7e3;
+    --muted: #5d6a63;
+    --green: #15803d;
+    --green-dark: #166534;
+    --green-bright: #22c55e;
+    --green-soft: #e6f5ec;
+    --green-mid: #b9e5c9;
+    --danger: #b42318;
+    --danger-soft: #fdecea;
+    --radius: 12px;
+    --font: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --side: 250px;
+    box-sizing: border-box;
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  html { scroll-padding-top: env(safe-area-inset-top, 0px); }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body { background: var(--bg); color: var(--ink); font: 15px/1.5 var(--font); -webkit-font-smoothing: antialiased; }
+  [hidden] { display: none !important; }
+  button, input, select { font: inherit; color: inherit; }
+  :focus-visible { outline: 2px solid var(--green-bright); outline-offset: 2px; }
+  svg.i { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+  .num { font-variant-numeric: tabular-nums; text-align: right; }
+  .muted { color: var(--muted); }
+  .strong { font-weight: 500; }
+
+  /* ---------- buttons & forms ---------- */
+  .btn {
+    display: inline-flex; align-items: center; gap: 8px; justify-content: center;
+    border: 1px solid var(--line); background: var(--white); padding: 9px 16px;
+    border-radius: 9px; cursor: pointer; font-weight: 500; transition: background .15s, border-color .15s;
+  }
+  .btn:hover { border-color: #b8c4bd; }
+  .btn.primary { background: var(--green); border-color: var(--green); color: #fff; }
+  .btn.primary:hover { background: var(--green-dark); border-color: var(--green-dark); }
+  .btn.dark { background: var(--black); border-color: var(--black); color: #fff; }
+  .btn.sm { padding: 5px 12px; font-size: 13px; border-radius: 8px; }
+  .btn.sm:hover { border-color: var(--green); color: var(--green); }
+  label.chk { display: flex; align-items: center; gap: 10px; font-size: 14px; color: var(--ink); font-weight: 400; cursor: pointer; }
+  label.chk input { width: auto; accent-color: var(--green); }
+  .btn:disabled { opacity: .55; cursor: default; }
+  .link { background: none; border: 0; padding: 0; color: var(--green); cursor: pointer; font-weight: 500; }
+  .link:hover { text-decoration: underline; text-underline-offset: 3px; }
+
+  label { display: block; font-size: 13px; font-weight: 500; color: var(--muted); margin-bottom: 5px; }
+  input, select {
+    width: 100%; background: var(--white); border: 1px solid var(--line);
+    border-radius: 9px; padding: 10px 12px;
+  }
+  input:focus, select:focus { border-color: var(--green); outline: none; box-shadow: 0 0 0 3px var(--green-soft); }
+  .field { margin-bottom: 14px; }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .err { color: var(--danger); font-size: 14px; min-height: 20px; margin: 0 0 8px; }
+
+  /* ---------- auth ---------- */
+  #auth { min-height: 100vh; display: grid; grid-template-columns: 1.05fr 1fr; }
+  .auth-art {
+    background:
+      radial-gradient(circle at 15% 110%, rgba(34,197,94,.55), transparent 45%),
+      radial-gradient(circle at 105% -10%, rgba(34,197,94,.28), transparent 40%),
+      var(--black);
+    color: #fff; padding: 48px; display: flex; flex-direction: column; justify-content: space-between;
+  }
+  .auth-art h2 { font-size: 36px; line-height: 1.15; font-weight: 700; letter-spacing: -.02em; margin: 0 0 14px; max-width: 420px; }
+  .auth-art p { margin: 0; color: #a9b8af; max-width: 380px; }
+  .auth-form { display: grid; place-items: center; padding: 32px; background: var(--white); }
+  .auth-card { width: 100%; max-width: 340px; }
+  .auth-card h1 { font-size: 26px; font-weight: 700; letter-spacing: -.02em; margin: 0 0 4px; }
+  .auth-card p.sub { margin: 0 0 26px; color: var(--muted); }
+  .auth-card .btn { width: 100%; padding: 11px 16px; }
+  .auth-switch { margin-top: 20px; font-size: 14px; color: var(--muted); text-align: center; }
+
+  .logo { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 17px; letter-spacing: -.01em; }
+  .logo-mark { width: 32px; height: 32px; border-radius: 9px; background: var(--green-bright); color: var(--black); display: grid; place-items: center; }
+
+  /* ---------- shell ---------- */
+  .shell { display: grid; grid-template-columns: var(--side) 1fr; min-height: 100vh; }
+  aside {
+    background: var(--black); color: #cfd9d3; position: sticky; top: 0; height: 100vh;
+    display: flex; flex-direction: column; padding: calc(22px + env(safe-area-inset-top, 0px)) 14px 16px; z-index: 30;
+  }
+  aside .logo { color: #fff; padding: 0 8px 26px; }
+  .side-label { font-size: 12px; color: #6d7d74; padding: 0 12px 8px; }
+  #nav { display: flex; flex-direction: column; gap: 3px; }
+  #nav button {
+    display: flex; align-items: center; gap: 12px; width: 100%; text-align: left;
+    background: none; border: 0; color: #a9b8af; padding: 10px 12px; border-radius: 9px; cursor: pointer;
+    position: relative; transition: background .15s, color .15s;
+  }
+  #nav button:hover { background: var(--black-2); color: #fff; }
+  #nav button[aria-current="page"] { background: rgba(34,197,94,.14); color: #4ade80; font-weight: 500; }
+  #nav button[aria-current="page"]::before {
+    content: ""; position: absolute; left: -14px; top: 9px; bottom: 9px; width: 3px; background: var(--green-bright); border-radius: 0 3px 3px 0;
+  }
+  .side-foot { margin-top: auto; border-top: 1px solid #1f2823; padding-top: 14px; display: flex; align-items: center; gap: 10px; }
+  .avatar-lg { width: 36px; height: 36px; border-radius: 50%; background: var(--green-bright); color: var(--black); display: grid; place-items: center; font-weight: 600; flex: none; }
+  .side-foot .who { min-width: 0; flex: 1; }
+  .side-foot .who b { display: block; color: #fff; font-weight: 500; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .side-foot .who small { color: #6d7d74; font-size: 12px; }
+  #logout { background: none; border: 0; color: #8ea097; cursor: pointer; padding: 6px; border-radius: 8px; display: grid; }
+  #logout:hover { background: var(--black-2); color: #fff; }
+
+  .topbar { display: none; }
+  .content { min-width: 0; }
+  main { max-width: 1120px; margin: 0 auto; padding: 32px 32px 80px; }
+  .head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; margin-bottom: 24px; flex-wrap: wrap; }
+  h1.title { font-size: 26px; font-weight: 700; letter-spacing: -.02em; margin: 0; }
+  .head p { margin: 2px 0 0; color: var(--muted); }
+
+  /* ---------- cards ---------- */
+  .card { background: var(--white); border: 1px solid var(--line); border-radius: var(--radius); padding: 20px; }
+  .card h3 { margin: 0; font-size: 15px; font-weight: 600; }
+  .card-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 16px; }
+  .stat { position: relative; overflow: hidden; }
+  .stat .ic { width: 36px; height: 36px; border-radius: 10px; background: var(--green-soft); color: var(--green); display: grid; place-items: center; margin-bottom: 14px; }
+  .stat span.l { display: block; color: var(--muted); font-size: 13px; }
+  .stat strong { display: block; font-size: 26px; font-weight: 600; letter-spacing: -.02em; font-variant-numeric: tabular-nums; margin-top: 2px; }
+  .stat small { color: var(--muted); font-size: 13px; }
+  .stat.hero { background: var(--green); border-color: var(--green); color: #fff; }
+  .stat.hero .ic { background: rgba(255,255,255,.18); color: #fff; }
+  .stat.hero span.l, .stat.hero small { color: #d3f0dd; }
+  .grid2 { display: grid; grid-template-columns: 1.6fr 1fr; gap: 16px; margin-bottom: 16px; }
+  .grid2.even { grid-template-columns: 1fr 1fr; }
+
+  /* chart & donut */
+  .chart svg { width: 100%; height: auto; display: block; }
+  .bar { fill: var(--green-mid); }
+  .bar.now { fill: var(--green); }
+  .chart text { font: 12px var(--font); fill: var(--muted); }
+  .chart text.v { fill: var(--ink); font-weight: 500; }
+  .donut-wrap { display: flex; align-items: center; gap: 22px; flex-wrap: wrap; }
+  .donut { width: 128px; height: 128px; flex: none; position: relative; }
+  .donut svg { width: 100%; height: 100%; transform: rotate(-90deg); }
+  .donut .track { stroke: var(--green-soft); }
+  .donut .val { stroke: var(--green); stroke-linecap: round; }
+  .donut .mid { position: absolute; inset: 0; display: grid; place-items: center; text-align: center; font-size: 24px; font-weight: 600; }
+  .donut .mid small { display: block; font-size: 12px; font-weight: 400; color: var(--muted); margin-top: -4px; }
+  .legend { display: grid; gap: 12px; }
+  .legend div { display: flex; align-items: center; gap: 10px; font-size: 14px; }
+  .legend i { width: 10px; height: 10px; border-radius: 3px; background: var(--green); }
+  .legend i.b { background: var(--green-soft); box-shadow: inset 0 0 0 1px var(--green-mid); }
+  .legend strong { display: block; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .legend span { color: var(--muted); font-size: 13px; }
+
+  /* mini lists */
+  .rows { display: grid; }
+  .r { display: flex; align-items: center; gap: 12px; padding: 11px 0; border-top: 1px solid var(--line); }
+  .r:first-child { border-top: 0; padding-top: 0; }
+  .r:last-child { padding-bottom: 0; }
+  .r .grow { flex: 1; min-width: 0; }
+  .r .grow b { display: block; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .r .grow small { color: var(--muted); font-size: 13px; }
+  .r .amt { font-weight: 600; font-variant-numeric: tabular-nums; }
+  .av { width: 34px; height: 34px; border-radius: 50%; background: var(--green-soft); color: var(--green); display: grid; place-items: center; font-weight: 600; font-size: 14px; flex: none; }
+  .av.sm { width: 28px; height: 28px; font-size: 12px; }
+  .cellc { display: flex; align-items: center; gap: 10px; }
+
+  .pill { display: inline-block; font-size: 12px; font-weight: 500; padding: 3px 10px; border-radius: 99px; background: var(--green-soft); color: var(--green); white-space: nowrap; }
+  .pill.done { background: var(--black); color: #fff; }
+  .pill.late { background: var(--danger-soft); color: var(--danger); }
+
+  /* ---------- tables / lists ---------- */
+  .toolbar { display: flex; gap: 12px; margin-bottom: 14px; align-items: center; flex-wrap: wrap; }
+  .toolbar input[type=search] { max-width: 320px; }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--white); }
+  .seg button { background: none; border: 0; padding: 9px 16px; cursor: pointer; color: var(--muted); }
+  .seg button[aria-pressed="true"] { background: var(--black); color: #fff; font-weight: 500; }
+
+  .wrap { background: var(--white); border: 1px solid var(--line); border-radius: var(--radius); overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; min-width: 780px; }
+  th, td { padding: 13px 18px; text-align: left; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th { font-weight: 500; font-size: 13px; color: var(--muted); background: #fafcfb; }
+  th.num, td.num { text-align: right; }
+  tbody tr:hover td { background: #fafcfb; }
+  tr:last-child td { border-bottom: 0; }
+  .wrap.plain { border: 0; }
+
+  .grid { display: grid; grid-template-columns: 2fr 1.3fr .7fr .7fr 1.2fr; gap: 12px; align-items: center; }
+  .list-head { padding: 12px 18px; font-size: 13px; font-weight: 500; color: var(--muted); background: #fafcfb; border-bottom: 1px solid var(--line); }
+  details.row { border-bottom: 1px solid var(--line); }
+  details.row:last-child { border-bottom: 0; }
+  details.row summary { padding: 14px 18px; cursor: pointer; list-style: none; }
+  details.row summary::-webkit-details-marker { display: none; }
+  details.row summary:hover { background: #fafcfb; }
+  details.row[open] summary { background: var(--green-soft); }
+  .detail { padding: 16px 18px 20px; background: #fafcfb; }
+  .detail .addr { color: var(--muted); margin: 0 0 12px; }
+  .detail table { min-width: 0; }
+  .detail .wrap { border-radius: 10px; }
+
+  .prod-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 16px; }
+  .prod { display: flex; flex-direction: column; gap: 8px; transition: border-color .15s; }
+  .prod:hover { border-color: var(--green-mid); }
+  .prod small { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .prod b { font-size: 16px; font-weight: 600; }
+  .prod p { margin: 0; color: var(--muted); flex: 1; }
+
+  .empty { text-align: center; padding: 44px 16px; color: var(--muted); }
+  .empty p { margin: 0 0 12px; }
+  .empty.sm { padding: 18px 0; }
+
+  /* ---------- dialog & toast ---------- */
+  dialog { border: 0; border-radius: 16px; padding: 26px; width: min(480px, calc(100vw - 32px)); background: var(--white); color: var(--ink); box-shadow: 0 24px 60px rgba(0,0,0,.28); }
+  dialog::backdrop { background: rgba(8, 12, 10, .55); }
+  dialog h2 { margin: 0 0 20px; font-size: 20px; font-weight: 700; letter-spacing: -.01em; }
+  .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
+  .calc { background: var(--green-soft); color: var(--green-dark); border-radius: 9px; padding: 10px 12px; font-size: 14px; margin: 0 0 14px; }
+  .calc strong { font-weight: 600; font-variant-numeric: tabular-nums; }
+  #toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: var(--black); color: #fff; padding: 11px 18px; border-radius: 10px; font-size: 14px; opacity: 0; pointer-events: none; transition: opacity .2s; border-left: 3px solid var(--green-bright); z-index: 60; }
+  #toast.show { opacity: 1; }
+  .scrim { display: none; }
+
+  /* ---------- responsive ---------- */
+  /* Large tablet landscape (e.g. 11" iPad Pro ~1194px) and small laptops */
+  @media (max-width: 1180px) {
+    :root { --side: 220px; }
+    main { padding: 28px 24px 72px; }
+  }
+  /* Tablet range: 11" landscape (~1194) down through portrait (~834) */
+  @media (max-width: 1024px) {
+    .stats { grid-template-columns: repeat(2, 1fr); }
+    .grid2, .grid2.even { grid-template-columns: 1fr; }
+    .prod-grid { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
+  }
+  /* Below this, sidebar becomes a slide-out drawer: covers 11" portrait tablets and all phones */
+  @media (max-width: 900px) {
+    :root { --side: 270px; }
+    #auth { grid-template-columns: 1fr; }
+    .auth-art { display: none; }
+    .shell { grid-template-columns: 1fr; }
+    aside { position: fixed; left: 0; top: 0; bottom: 0; width: var(--side); transform: translateX(-100%); transition: transform .2s; }
+    body.nav-open aside { transform: none; }
+    body.nav-open .scrim { display: block; position: fixed; inset: 0; background: rgba(0,0,0,.5); z-index: 25; }
+    .topbar { display: flex; align-items: center; gap: 12px; background: var(--black); color: #fff; padding: calc(14px + env(safe-area-inset-top, 0px)) 16px 14px; position: sticky; top: 0; z-index: 20; }
+    .topbar button { background: none; border: 0; color: #fff; cursor: pointer; display: grid; padding: 8px; min-width: 40px; min-height: 40px; place-items: center; }
+    main { padding: 24px 20px 64px; }
+    .head { align-items: flex-start; }
+    .grid { grid-template-columns: 1fr 1fr; }
+    .list-head { display: none; }
+    .two { grid-template-columns: 1fr; }
+    /* larger touch targets */
+    #nav button { padding: 13px 14px; font-size: 15px; }
+    .btn { padding: 11px 16px; }
+    .btn.sm { padding: 9px 14px; }
+    th, td { padding: 12px 14px; }
+    input, select { padding: 11px 12px; font-size: 16px; }
+    .seg button { padding: 11px 14px; }
+    dialog { padding: 22px; }
+  }
+  @media (max-width: 640px) {
+    .stats { grid-template-columns: 1fr; }
+    .donut-wrap { justify-content: center; text-align: left; }
+    .head { flex-direction: column; align-items: stretch; }
+    .head .btn { width: 100%; }
+    .toolbar { flex-direction: column; align-items: stretch; }
+    .toolbar input[type=search] { max-width: none; }
+    .seg { width: 100%; }
+    .seg button { flex: 1; }
+    .prod-grid { grid-template-columns: 1fr 1fr; gap: 12px; }
+  }
+  @media (max-width: 420px) {
+    .prod-grid { grid-template-columns: 1fr; }
+    .card { padding: 16px; }
+    main { padding: 20px 14px 56px; }
+  }
+  @media (hover: none) and (pointer: coarse) {
+    .btn, #nav button, .link, .seg button, details.row summary { min-height: 40px; }
+  }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+
+<!-- ================= AUTH ================= -->
+<section id="auth" hidden>
+  <div class="auth-art">
+    <div class="logo"><span class="logo-mark" data-icon="logo"></span>Order Desk</div>
+    <div>
+      <h2>Orders, clients and payments in one place.</h2>
+      <p>Track deliveries, see what's still owed, and keep your product list tidy.</p>
+    </div>
+    <p style="font-size:13px">Admin access only</p>
+  </div>
+  <div class="auth-form">
+    <div class="auth-card">
+      <h1 id="authTitle">Log in</h1>
+      <p class="sub">Welcome back. Enter your admin details.</p>
+      <form id="authForm">
+        <div class="field"><label for="au">Username</label><input id="au" name="username" autocomplete="username" required></div>
+        <div class="field"><label for="ap">Password</label><input id="ap" name="password" type="password" autocomplete="current-password" required></div>
+        <p class="err" id="authErr" role="alert"></p>
+        <button class="btn primary" id="authBtn">Log in</button>
+      </form>
+      <p class="auth-switch"><span id="authSwitchText">Need an admin account?</span> <button class="link" id="authSwitch" type="button">Create account</button></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= APP ================= -->
+<div id="app" class="shell" hidden>
+  <aside>
+    <div class="logo"><span class="logo-mark" data-icon="logo"></span>Order Desk</div>
+    <div class="side-label">Menu</div>
+    <nav id="nav">
+      <button data-view="dashboard"><span data-icon="dashboard"></span>Dashboard</button>
+      <button data-view="orders"><span data-icon="orders"></span>Orders</button>
+      <button data-view="clients"><span data-icon="clients"></span>Clients</button>
+      <button data-view="products"><span data-icon="products"></span>Products</button>
+    </nav>
+    <div class="side-foot">
+      <div class="avatar-lg" id="whoAv">A</div>
+      <div class="who"><b id="whoName">Admin</b><small>Administrator</small></div>
+      <button id="logout" aria-label="Log out" title="Log out"><span data-icon="logout"></span></button>
+    </div>
+  </aside>
+  <div class="scrim" id="scrim"></div>
+  <div class="content">
+    <div class="topbar"><button id="menuBtn" aria-label="Open menu"><span data-icon="menu"></span></button><b>Order Desk</b></div>
+    <main id="view"></main>
+  </div>
+</div>
+
+<dialog id="dlg"></dialog>
+<div id="toast" role="status" aria-live="polite"></div>
+
+<script>
+/* ---------- config ---------- */
+// Empty = same origin (page served by Express on :3000). Otherwise (file:// or a dev server) it calls localhost:3000.
+const isLocalDev = location.protocol === 'file:' || ['localhost', '127.0.0.1'].includes(location.hostname);
+const API = isLocalDev && location.port !== '3000' ? 'http://localhost:3000' : '';
+
+/* ---------- icons ---------- */
+const ICONS = {
+  logo: '<path d="M4 7l8-4 8 4v10l-8 4-8-4z"/><path d="M4 7l8 4 8-4M12 11v10"/>',
+  dashboard: '<rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/>',
+  orders: '<path d="M6 3h12v18l-3-2-3 2-3-2-3 2z"/><path d="M9 8h6M9 12h6"/>',
+  clients: '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c.6-3.4 3.2-5.5 6.5-5.5s5.9 2.1 6.5 5.5"/><path d="M16 4.6a3.5 3.5 0 010 6.8M18 14.8c2 .7 3.2 2.4 3.5 5.2"/>',
+  products: '<path d="M3 7.5L12 3l9 4.5v9L12 21l-9-4.5z"/><path d="M3 7.5L12 12l9-4.5M12 12v9"/>',
+  logout: '<path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4M16 17l5-5-5-5M21 12H9"/>',
+  menu: '<path d="M4 6h16M4 12h16M4 18h16"/>',
+  plus: '<path d="M12 5v14M5 12h14"/>',
+  wallet: '<path d="M3 7a2 2 0 012-2h13v4"/><path d="M3 7v10a2 2 0 002 2h15a1 1 0 001-1V10a1 1 0 00-1-1H5a2 2 0 01-2-2z"/><circle cx="16.5" cy="14" r="1"/>',
+  trend: '<path d="M3 17l6-6 4 4 8-8"/><path d="M15 7h6v6"/>'
+};
+const icon = n => `<svg class="i" viewBox="0 0 24 24" aria-hidden="true">${ICONS[n]}</svg>`;
+function paintIcons(root = document) { root.querySelectorAll('[data-icon]').forEach(el => { el.innerHTML = icon(el.dataset.icon); el.style.display = 'grid'; }); }
+function logoInto() { document.querySelectorAll('.logo-mark').forEach(el => { el.innerHTML = icon('logo'); }); }
+
+/* ---------- helpers ---------- */
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const money = n => '₹' + Number(n || 0).toLocaleString('en-IN');
+const compact = n => n >= 1e7 ? (n / 1e7).toFixed(1).replace(/\.0$/, '') + 'Cr' : n >= 1e5 ? (n / 1e5).toFixed(1).replace(/\.0$/, '') + 'L' : n >= 1e3 ? (n / 1e3).toFixed(1).replace(/\.0$/, '') + 'k' : String(Math.round(n));
+const today = () => new Date().toISOString().slice(0, 10);
+const initial = s => esc((String(s || '?').trim()[0] || '?').toUpperCase());
+function parseDate(s) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s || '');
+  return m ? new Date(+m[1], +m[2] - 1, +m[3]) : new Date(s);
+}
+const ts = s => { const d = parseDate(s); return isNaN(d) ? Infinity : d.getTime(); };
+function fmtDate(s) {
+  const d = parseDate(s);
+  return isNaN(d) ? esc(s) : d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
+}
+const sum = (arr, k) => arr.reduce((t, x) => t + (Number(x[k]) || 0), 0);
+let toastTimer;
+function toast(msg) {
+  const t = $('#toast'); t.textContent = msg; t.classList.add('show');
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), 2600);
+}
+
+async function api(path, method = 'GET', body) {
+  const opts = { method, headers: {} };
+  if (body !== undefined) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
+  let res;
+  try { res = await fetch(API + path, opts); }
+  catch { throw new Error('Cannot reach the server. Check that the backend is running.'); }
+  let data = null;
+  try { data = await res.json(); } catch {}
+  if (!res.ok) throw new Error((data && (data.message || data.error)) || `Request failed (${res.status})`);
+  return data;
+}
+
+/* ---------- state ---------- */
+const state = { view: 'dashboard', orders: [], clients: [], products: [], filter: 'All', q: '' };
+const clientName = id => (state.clients.find(c => c._id === id) || {}).name || 'Unknown client';
+const statusPill = s => `<span class="pill ${s === 'Completed' ? 'done' : ''}">${esc(s)}</span>`;
+
+/* ---------- auth ---------- */
+let authMode = 'login';
+function setAuthMode(mode) {
+  authMode = mode;
+  const login = mode === 'login';
+  $('#authTitle').textContent = login ? 'Log in' : 'Create account';
+  $('#authBtn').textContent = login ? 'Log in' : 'Create account';
+  $('#authSwitchText').textContent = login ? 'Need an admin account?' : 'Already have an account?';
+  $('#authSwitch').textContent = login ? 'Create account' : 'Log in';
+  $('#ap').autocomplete = login ? 'current-password' : 'new-password';
+  $('#authErr').textContent = '';
+}
+$('#authSwitch').onclick = () => setAuthMode(authMode === 'login' ? 'signup' : 'login');
+
+$('#authForm').addEventListener('submit', async e => {
+  e.preventDefault();
+  const username = $('#au').value.trim(), password = $('#ap').value, btn = $('#authBtn');
+  btn.disabled = true; $('#authErr').textContent = '';
+  try {
+    if (authMode === 'signup') await api('/signup', 'POST', { username, password });
+    await api('/login', 'POST', { username, password });
+    sessionStorage.setItem('admin', username);
+    $('#authForm').reset();
+    showApp();
+  } catch (err) { $('#authErr').textContent = err.message; }
+  finally { btn.disabled = false; }
+});
+
+$('#logout').onclick = () => {
+  sessionStorage.removeItem('admin');
+  $('#app').hidden = true; $('#auth').hidden = false;
+  document.body.classList.remove('nav-open');
+  setAuthMode('login');
+};
+
+function showApp() {
+  $('#auth').hidden = true; $('#app').hidden = false;
+  const n = sessionStorage.getItem('admin') || 'Admin';
+  $('#whoName').textContent = n; $('#whoAv').textContent = (n[0] || 'A').toUpperCase();
+  state.view = 'dashboard';
+  loadAll();
+}
+
+/* ---------- data ---------- */
+async function loadAll() {
+  $('#view').innerHTML = '<p class="muted">Loading…</p>';
+  try {
+    const [orders, clients, products] = await Promise.all([api('/orders'), api('/allclients'), api('/products')]);
+    state.orders = orders.slice().reverse();
+    state.clients = clients;
+    state.products = products;
+    render();
+  } catch (err) {
+    $('#view').innerHTML = `<div class="card empty"><p>${esc(err.message)}</p><button class="btn" id="retry">Try again</button></div>`;
+    $('#retry').onclick = loadAll;
+  }
+}
+
+/* ---------- nav ---------- */
+function go(view) {
+  state.view = view; state.q = ''; state.filter = 'All';
+  document.body.classList.remove('nav-open');
+  render(); window.scrollTo(0, 0);
+}
+$('#nav').addEventListener('click', e => { const b = e.target.closest('button[data-view]'); if (b) go(b.dataset.view); });
+$('#menuBtn').onclick = () => document.body.classList.add('nav-open');
+$('#scrim').onclick = () => document.body.classList.remove('nav-open');
+document.addEventListener('click', e => { const g = e.target.closest('[data-goto]'); if (g) go(g.dataset.goto); });
+
+function render() {
+  document.querySelectorAll('#nav button').forEach(b => {
+    if (b.dataset.view === state.view) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
+  });
+  ({ dashboard: viewDashboard, orders: viewOrders, clients: viewClients, products: viewProducts })[state.view]();
+  paintIcons($('#view'));
+}
+
+/* ================= DASHBOARD ================= */
+function viewDashboard() {
+  const o = state.orders, c = state.clients;
+  const active = o.filter(x => x.Status === 'Active');
+  const total = sum(o, 'TotalValue'), due = sum(o, 'RemainingPayment'), collected = Math.max(total - due, 0);
+  const pct = total ? Math.round(collected / total * 100) : 0;
+  const t0 = new Date(); t0.setHours(0, 0, 0, 0);
+  const overdue = active.filter(x => ts(x.DeliveryDate) < t0.getTime()).length;
+  const upcoming = active.slice().sort((a, b) => ts(a.DeliveryDate) - ts(b.DeliveryDate)).slice(0, 5);
+  const topDue = c.filter(x => x.BalanceDue > 0).sort((a, b) => b.BalanceDue - a.BalanceDue).slice(0, 5);
+  const recent = o.slice(0, 5);
+  const hour = new Date().getHours();
+  const greet = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
+  const name = sessionStorage.getItem('admin') || 'Admin';
+
+  $('#view').innerHTML = `
+    <div class="head">
+      <div><h1 class="title">${greet}, ${esc(name)}</h1><p>${new Date().toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}</p></div>
+      <button class="btn primary" id="add"><span data-icon="plus"></span>New order</button>
+    </div>
+
+    <div class="stats">
+      <div class="card stat hero"><div class="ic" data-icon="orders"></div><span class="l">Active orders</span><strong>${active.length}</strong><small>${overdue ? overdue + ' past delivery date' : 'All on schedule'}</small></div>
+      <div class="card stat"><div class="ic" data-icon="wallet"></div><span class="l">Balance due</span><strong>${money(due)}</strong><small>Across ${o.filter(x => x.RemainingPayment > 0).length} orders</small></div>
+      <div class="card stat"><div class="ic" data-icon="trend"></div><span class="l">Total order value</span><strong>${money(total)}</strong><small>${o.length} orders in total</small></div>
+      <div class="card stat"><div class="ic" data-icon="clients"></div><span class="l">Clients</span><strong>${c.length}</strong><small>${state.products.length} products listed</small></div>
+    </div>
+
+    <div class="grid2">
+      <div class="card chart"><div class="card-head"><h3>Order value by month</h3><span class="muted" style="font-size:13px">Last 6 months</span></div>${monthChart()}</div>
+      <div class="card"><div class="card-head"><h3>Payments</h3></div>
+        <div class="donut-wrap">
+          <div class="donut">
+            <svg viewBox="0 0 140 140"><circle class="track" cx="70" cy="70" r="54" fill="none" stroke-width="14"/><circle class="val" cx="70" cy="70" r="54" fill="none" stroke-width="14" stroke-dasharray="${(pct * 339.29 / 100).toFixed(1)} 339.29"/></svg>
+            <div class="mid"><div>${pct}%<small>collected</small></div></div>
+          </div>
+          <div class="legend">
+            <div><i></i><span style="color:var(--ink);font-size:14px"><strong>${money(collected)}</strong><span>Received</span></span></div>
+            <div><i class="b"></i><span style="color:var(--ink);font-size:14px"><strong>${money(due)}</strong><span>Still due</span></span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="grid2 even">
+      <div class="card"><div class="card-head"><h3>Upcoming deliveries</h3><button class="link" data-goto="orders">View orders</button></div>
+        ${upcoming.length ? `<div class="rows">${upcoming.map(x => `
+          <div class="r"><div class="av">${initial(clientName(x.Client))}</div>
+            <div class="grow"><b>${esc(x.OrderID)}</b><small>${esc(clientName(x.Client))} · ${fmtDate(x.DeliveryDate)}</small></div>
+            ${dueBadge(x, t0)}</div>`).join('')}</div>` : '<div class="empty sm">No active orders to deliver.</div>'}
+      </div>
+      <div class="card"><div class="card-head"><h3>Highest balances</h3><button class="link" data-goto="clients">View clients</button></div>
+        ${topDue.length ? `<div class="rows">${topDue.map(x => `
+          <div class="r"><div class="av">${initial(x.name)}</div>
+            <div class="grow"><b>${esc(x.name)}</b><small>${x.ActiveOrders} active of ${x.TotalOrders} orders</small></div>
+            <span class="amt">${money(x.BalanceDue)}</span></div>`).join('')}</div>` : '<div class="empty sm">Nothing outstanding.</div>'}
+      </div>
+    </div>
+
+    <div class="card" style="padding:0">
+      <div class="card-head" style="padding:20px 20px 0"><h3>Recent orders</h3><button class="link" data-goto="orders">See all</button></div>
+      ${recent.length ? `<div class="wrap plain"><table>
+        <thead><tr><th>Order</th><th>Client</th><th>Delivery</th><th class="num">Total</th><th class="num">Remaining</th><th>Status</th></tr></thead>
+        <tbody>${recent.map(x => `<tr><td class="strong">${esc(x.OrderID)}</td>
+          <td><div class="cellc"><span class="av sm">${initial(clientName(x.Client))}</span>${esc(clientName(x.Client))}</div></td>
+          <td>${fmtDate(x.DeliveryDate)}</td><td class="num">${money(x.TotalValue)}</td><td class="num">${money(x.RemainingPayment)}</td>
+          <td>${statusPill(x.Status)}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty"><p>No orders yet.</p></div>'}
+    </div>`;
+  $('#add').onclick = openOrderForm;
+}
+function dueBadge(x, t0) {
+  const d = ts(x.DeliveryDate);
+  if (!isFinite(d)) return '';
+  const days = Math.round((d - t0.getTime()) / 864e5);
+  if (days < 0) return `<span class="pill late">${-days}d overdue</span>`;
+  if (days === 0) return '<span class="pill">Due today</span>';
+  if (days === 1) return '<span class="pill">Tomorrow</span>';
+  return `<span class="pill">In ${days} days</span>`;
+}
+function monthChart() {
+  const now = new Date(), months = [];
+  for (let i = 5; i >= 0; i--) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    months.push({ y: d.getFullYear(), m: d.getMonth(), label: d.toLocaleDateString('en-IN', { month: 'short' }), v: 0 });
+  }
+  state.orders.forEach(x => {
+    const d = parseDate(x.ReceivingDate); if (isNaN(d)) return;
+    const slot = months.find(k => k.y === d.getFullYear() && k.m === d.getMonth());
+    if (slot) slot.v += Number(x.TotalValue) || 0;
+  });
+  const max = Math.max(...months.map(k => k.v), 1);
+  if (!months.some(k => k.v > 0)) return '<div class="empty sm">Order value will appear here once you have orders.</div>';
+  const W = 480, H = 210, top = 24, bottom = 28, slotW = W / 6, bw = 40, ch = H - top - bottom;
+  return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Order value for the last six months">
+    <line x1="0" x2="${W}" y1="${H - bottom}" y2="${H - bottom}" stroke="#e1e7e3"/>
+    ${months.map((k, i) => {
+      const h = k.v ? Math.max(k.v / max * ch, 4) : 0, x = i * slotW + (slotW - bw) / 2, y = H - bottom - h;
+      return `${k.v ? `<rect class="bar ${i === 5 ? 'now' : ''}" x="${x}" y="${y}" width="${bw}" height="${h}" rx="6"/><text class="v" x="${x + bw / 2}" y="${y - 7}" text-anchor="middle">₹${compact(k.v)}</text>` : ''}
+        <text x="${x + bw / 2}" y="${H - 8}" text-anchor="middle">${k.label}</text>`;
+    }).join('')}</svg>`;
+}
+
+/* ================= ORDERS ================= */
+function viewOrders() {
+  const o = state.orders;
+  $('#view').innerHTML = `
+    <div class="head"><div><h1 class="title">Orders</h1><p>${o.length} total, ${o.filter(x => x.Status === 'Active').length} active</p></div>
+      <button class="btn primary" id="add"><span data-icon="plus"></span>New order</button></div>
+    <div class="toolbar">
+      <input type="search" id="q" placeholder="Search by order ID or client" aria-label="Search orders" value="${esc(state.q)}">
+      <div class="seg" id="seg">${['All', 'Active', 'Completed'].map(f => `<button data-f="${f}" aria-pressed="${state.filter === f}">${f}</button>`).join('')}</div>
+    </div>
+    <div id="list"></div>`;
+  $('#add').onclick = openOrderForm;
+  $('#q').oninput = e => { state.q = e.target.value; ordersTable(); };
+  $('#list').onclick = e => { const b = e.target.closest('[data-status]'); if (b) changeStatus(b.dataset.status); };
+  $('#seg').onclick = e => {
+    const b = e.target.closest('button'); if (!b) return;
+    state.filter = b.dataset.f;
+    document.querySelectorAll('#seg button').forEach(x => x.setAttribute('aria-pressed', x === b));
+    ordersTable();
+  };
+  ordersTable();
+}
+function ordersTable() {
+  const q = state.q.trim().toLowerCase();
+  const rows = state.orders.filter(x => (state.filter === 'All' || x.Status === state.filter) &&
+    (!q || x.OrderID.toLowerCase().includes(q) || clientName(x.Client).toLowerCase().includes(q)));
+  if (!rows.length) {
+    $('#list').innerHTML = `<div class="wrap"><div class="empty"><p>${state.orders.length ? 'No orders match your search.' : 'No orders yet. Create the first one.'}</p></div></div>`;
+    return;
+  }
+  $('#list').innerHTML = `<div class="wrap"><table>
+    <thead><tr><th>Order</th><th>Client</th><th>Received</th><th>Delivery</th><th class="num">Total</th><th class="num">Advance</th><th class="num">Remaining</th><th>Status</th><th></th></tr></thead>
+    <tbody>${rows.map(x => `<tr>
+      <td class="strong">${esc(x.OrderID)}</td>
+      <td><div class="cellc"><span class="av sm">${initial(clientName(x.Client))}</span>${esc(clientName(x.Client))}</div></td>
+      <td>${fmtDate(x.ReceivingDate)}</td><td>${fmtDate(x.DeliveryDate)}</td>
+      <td class="num">${money(x.TotalValue)}</td><td class="num">${money(x.Advance)}</td><td class="num">${money(x.RemainingPayment)}</td>
+      <td>${statusPill(x.Status)}</td>
+      <td class="num"><button class="btn sm" data-status="${esc(x._id)}">${x.Status === 'Active' ? 'Mark completed' : 'Reopen'}</button></td></tr>`).join('')}</tbody></table></div>`;
+}
+
+async function setStatus(o, Status, markPaid) {
+  await api(`/orders/${encodeURIComponent(o._id)}/status`, 'PATCH', { Status, markPaid: !!markPaid });
+  toast(Status === 'Completed' ? `${o.OrderID} marked completed` : `${o.OrderID} reopened`);
+  await loadAll();
+}
+function changeStatus(id) {
+  const o = state.orders.find(x => x._id === id);
+  if (!o) return;
+  if (o.Status === 'Completed') { setStatus(o, 'Active').catch(e => toast(e.message)); return; }
+  if (o.RemainingPayment > 0) {
+    openForm(`Complete ${o.OrderID}`,
+      `<p class="muted" style="margin-top:0">${esc(clientName(o.Client))} still owes ${money(o.RemainingPayment)} on this order.</p>
+       <div class="field"><label class="chk"><input type="checkbox" name="markPaid" checked> The remaining ${money(o.RemainingPayment)} has been received</label></div>`,
+      'Mark completed', d => setStatus(o, 'Completed', d.markPaid === 'on'));
+  } else {
+    setStatus(o, 'Completed').catch(e => toast(e.message));
+  }
+}
+
+function openOrderForm() {
+  if (!state.clients.length) {
+    toast('Add a client before creating an order');
+    go('clients'); return;
+  }
+  const fields = `
+    <div class="field"><label for="Client">Client</label>
+      <select id="Client" name="Client" required>${state.clients.map(c => `<option value="${esc(c._id)}">${esc(c.name)} (${esc(c.Phone)})</option>`).join('')}</select></div>
+    <div class="two">
+      <div class="field"><label for="ReceivingDate">Receiving date</label><input id="ReceivingDate" name="ReceivingDate" type="date" value="${today()}" required></div>
+      <div class="field"><label for="DeliveryDate">Delivery date</label><input id="DeliveryDate" name="DeliveryDate" type="date" required></div>
+    </div>
+    <div class="two">
+      <div class="field"><label for="TotalValue">Total value (₹)</label><input id="TotalValue" name="TotalValue" type="number" min="0" step="any" inputmode="decimal" required></div>
+      <div class="field"><label for="Advance">Advance (₹)</label><input id="Advance" name="Advance" type="number" min="0" step="any" inputmode="decimal" value="0" required></div>
+    </div>
+    <div class="two">
+      <div class="field"><label for="AdvanceMode">Advance mode</label>
+        <select id="AdvanceMode" name="AdvanceMode"><option>Cash</option><option>UPI</option><option>Bank transfer</option><option>Cheque</option></select></div>
+      <div class="field"><label for="AdvanceDate">Advance date</label><input id="AdvanceDate" name="AdvanceDate" type="date" value="${today()}" required></div>
+    </div>
+    <p class="calc">Remaining payment: <strong id="remain">₹0</strong></p>`;
+  openForm('New order', fields, 'Create order', async d => {
+    const total = +d.TotalValue, adv = +d.Advance;
+    if (adv > total) throw new Error('Advance cannot be more than the total value.');
+    if (d.DeliveryDate < d.ReceivingDate) throw new Error('Delivery date cannot be before the receiving date.');
+    const r = await api('/neworder', 'POST', { ...d, TotalValue: total, Advance: adv });
+    toast(`Order ${r.order.OrderID} created`);
+    await loadAll();
+  }, () => {
+    const upd = () => { $('#remain').textContent = money((+$('#TotalValue').value || 0) - (+$('#Advance').value || 0)); };
+    $('#TotalValue').oninput = upd; $('#Advance').oninput = upd;
+  });
+}
+
+/* ================= CLIENTS ================= */
+function viewClients() {
+  $('#view').innerHTML = `
+    <div class="head"><div><h1 class="title">Clients</h1><p>${state.clients.length} clients, ${money(sum(state.clients, 'BalanceDue'))} outstanding</p></div>
+      <button class="btn primary" id="add"><span data-icon="plus"></span>New client</button></div>
+    <div class="toolbar"><input type="search" id="q" placeholder="Search by name or phone" aria-label="Search clients" value="${esc(state.q)}"></div>
+    <div id="list"></div>`;
+  $('#add').onclick = openClientForm;
+  $('#q').oninput = e => { state.q = e.target.value; clientsList(); };
+  clientsList();
+}
+function clientsList() {
+  const q = state.q.trim().toLowerCase();
+  const rows = state.clients.filter(c => !q || c.name.toLowerCase().includes(q) || c.Phone.includes(q));
+  if (!rows.length) {
+    $('#list').innerHTML = `<div class="wrap"><div class="empty"><p>${state.clients.length ? 'No clients match your search.' : 'No clients yet. Add your first client.'}</p></div></div>`;
+    return;
+  }
+  $('#list').innerHTML = `<div class="wrap">
+    <div class="list-head grid"><span>Name</span><span>Phone</span><span>Orders</span><span>Active</span><span class="num">Balance due</span></div>
+    ${rows.map(c => `<details class="row"><summary class="grid">
+        <span class="cellc"><span class="av sm">${initial(c.name)}</span><span class="strong">${esc(c.name)}</span></span>
+        <span>${esc(c.Phone)}</span><span>${c.TotalOrders}</span><span>${c.ActiveOrders}</span><span class="num strong">${money(c.BalanceDue)}</span>
+      </summary>
+      <div class="detail">
+        <p class="addr">${esc(c.Add)}</p>
+        ${c.Orders.length ? `<div class="wrap"><table>
+          <thead><tr><th>Order</th><th>Delivery</th><th class="num">Total</th><th class="num">Advance</th><th class="num">Remaining</th><th>Status</th></tr></thead>
+          <tbody>${c.Orders.map(o => `<tr><td class="strong">${esc(o.OrderID)}</td><td>${fmtDate(o.DeliveryDate)}</td>
+            <td class="num">${money(o.TotalValue)}</td><td class="num">${money(o.Advance)}</td><td class="num">${money(o.RemainingPayment)}</td>
+            <td>${statusPill(o.Status)}</td></tr>`).join('')}</tbody></table></div>` : '<p class="muted" style="margin:0">No orders yet for this client.</p>'}
+      </div></details>`).join('')}</div>`;
+}
+function openClientForm() {
+  const fields = `
+    <div class="field"><label for="name">Name</label><input id="name" name="name" required></div>
+    <div class="field"><label for="Phone">Phone</label><input id="Phone" name="Phone" inputmode="numeric" maxlength="10" pattern="\\d{10}" title="10 digits" required></div>
+    <div class="field"><label for="Add">Address</label><input id="Add" name="Add" required></div>`;
+  openForm('New client', fields, 'Add client', async d => {
+    await api('/newclient', 'POST', d);
+    toast('Client added');
+    await loadAll();
+  });
+}
+
+/* ================= PRODUCTS ================= */
+function viewProducts() {
+  $('#view').innerHTML = `
+    <div class="head"><div><h1 class="title">Products</h1><p>${state.products.length} products in ${new Set(state.products.map(p => p.category)).size} categories</p></div>
+      <button class="btn primary" id="add"><span data-icon="plus"></span>New product</button></div>
+    <div class="toolbar"><input type="search" id="q" placeholder="Search by name or category" aria-label="Search products" value="${esc(state.q)}"></div>
+    <div id="list"></div>`;
+  $('#add').onclick = openProductForm;
+  $('#q').oninput = e => { state.q = e.target.value; productsGrid(); };
+  productsGrid();
+}
+function productsGrid() {
+  const q = state.q.trim().toLowerCase();
+  const rows = state.products.filter(p => !q || p.name.toLowerCase().includes(q) || p.category.toLowerCase().includes(q));
+  if (!rows.length) {
+    $('#list').innerHTML = `<div class="card empty"><p>${state.products.length ? 'No products match your search.' : 'No products yet. Add your first product.'}</p></div>`;
+    return;
+  }
+  $('#list').innerHTML = `<div class="prod-grid">${rows.map(p => `
+    <div class="card prod"><small>${esc(p.ProductID)}</small><b>${esc(p.name)}</b><p>${esc(p.desc)}</p><div><span class="pill">${esc(p.category)}</span></div></div>`).join('')}</div>`;
+}
+function openProductForm() {
+  const cats = [...new Set(state.products.map(p => p.category))];
+  const fields = `
+    <div class="field"><label for="name">Name</label><input id="name" name="name" required></div>
+    <div class="field"><label for="category">Category</label><input id="category" name="category" list="cats" required>
+      <datalist id="cats">${cats.map(c => `<option value="${esc(c)}">`).join('')}</datalist></div>
+    <div class="field"><label for="desc">Description</label><input id="desc" name="desc" required></div>`;
+  openForm('New product', fields, 'Add product', async d => {
+    const r = await api('/addproduct', 'POST', d);
+    toast(`Product ${r.product.ProductID} added`);
+    await loadAll();
+  });
+}
+
+/* ---------- shared dialog ---------- */
+function openForm(title, fields, submitLabel, onSubmit, afterOpen) {
+  const dlg = $('#dlg');
+  dlg.innerHTML = `<form id="f"><h2>${esc(title)}</h2>${fields}
+    <p class="err" id="ferr" role="alert"></p>
+    <div class="actions"><button type="button" class="btn" id="cancel">Cancel</button><button class="btn primary" id="submit">${esc(submitLabel)}</button></div></form>`;
+  $('#cancel').onclick = () => dlg.close();
+  $('#f').onsubmit = async e => {
+    e.preventDefault();
+    const btn = $('#submit'); btn.disabled = true; $('#ferr').textContent = '';
+    try {
+      const data = Object.fromEntries(new FormData(e.target).entries());
+      Object.keys(data).forEach(k => { if (typeof data[k] === 'string') data[k] = data[k].trim(); });
+      await onSubmit(data);
+      dlg.close();
+    } catch (err) { $('#ferr').textContent = err.message; btn.disabled = false; }
+  };
+  dlg.showModal();
+  if (afterOpen) afterOpen();
+}
+
+/* ---------- boot ---------- */
+paintIcons(); logoInto();
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
+}
+if (sessionStorage.getItem('admin')) showApp();
+else { $('#auth').hidden = false; setAuthMode('login'); }
+</script>
+</body>
+</html>
