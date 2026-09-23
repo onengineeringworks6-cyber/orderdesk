@@ -1,13 +1,14 @@
 // =============== MODULES =============================
 const express = require('express');
 const mongoose = require('mongoose')
+const path = require('path')
 // =====================================================
 
 // ================ BASIC APP ==========================
 const app = express();
 const port = 3000;
 app.use(express.json());
-app.use(express.static('static'));
+app.use(express.static(path.join(__dirname, '..', 'static')));
 // =====================================================
 
 // DATABASE CONNECTION
