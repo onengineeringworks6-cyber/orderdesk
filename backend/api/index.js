@@ -1,7 +1,7 @@
 // =============== MODULES =============================
 const express = require('express');
-const mongoose = require('mongoose')
-const path = require('path')
+const mongoose = require('mongoose');
+const path = require('path');
 // =====================================================
 
 // ================ BASIC APP ==========================
@@ -12,19 +12,22 @@ app.use(express.static(path.join(__dirname, '..', 'static')));
 // =====================================================
 
 // DATABASE CONNECTION
-mongoose.connect("mongodb+srv://onengineeringworks6:VAoDEw90cQoK36qT@cluster0.n5jpr.mongodb.net/?appName=Cluster0")
+// NOTE: left exactly as you currently have it deployed, so this update doesn't
+// accidentally break your live site. Switching to an environment variable is
+// still worth doing later, but as its own separate, deliberate step.
+mongoose.connect(process.env.MONGO_URI || "mongodb+srv://onengineeringworks6:VAoDEw90cQoK36qT@cluster0.n5jpr.mongodb.net/?appName=Cluster0");
 
 // USER MODEL
-const admin = mongoose.model("Admin",{
-    username:{
-        type:String,
-        required:true
-    },
-    password:{
-        type:String,
-        requiered:true
-    }
-})
+const admin = mongoose.model("Admin", {
+  username: {
+    type: String,
+    required: true
+  },
+  password: {
+    type: String,
+    required: true
+  }
+});
 
 // USER SIGNUP
 app.post('/signup', async (req, res) => {
@@ -81,7 +84,7 @@ app.post('/login', async (req, res) => {
 
 
 // ...............................ORDERS...............................
-// // ORDER MODEl
+// ORDER MODEL
 const orders = mongoose.model("Orders", {
   OrderID: {
     type: String,
@@ -134,8 +137,17 @@ const orders = mongoose.model("Orders", {
     type: String,
     enum: ["Active", "Completed"],
     default: "Active"
-  }
+  },
+
+  // History of every advance payment made against this order,
+  // including the initial one taken when the order was created.
+  AdvanceHistory: [{
+    amount: Number,
+    mode: String,
+    date: String
+  }]
 });
+
 app.post("/neworder", async (req, res) => {
   try {
 
@@ -164,7 +176,8 @@ app.post("/neworder", async (req, res) => {
       AdvanceMode,
       AdvanceDate,
       TotalValue,
-      RemainingPayment: TotalValue - Advance
+      RemainingPayment: TotalValue - Advance,
+      AdvanceHistory: Advance > 0 ? [{ amount: Advance, mode: AdvanceMode, date: AdvanceDate }] : []
     });
 
     await newOrder.save();
@@ -194,6 +207,84 @@ app.get('/orders', async (req, res) => {
       message: "Error fetching orders",
       error: error.message
     });
+  }
+});
+
+// EDIT AN ORDER
+app.patch('/orders/:id', async (req, res) => {
+  try {
+    const order = await orders.findById(req.params.id);
+    if (!order) {
+      return res.status(404).json({ message: "Order not found" });
+    }
+
+    const { ReceivingDate, DeliveryDate, TotalValue } = req.body;
+
+    if (ReceivingDate !== undefined) order.ReceivingDate = ReceivingDate;
+    if (DeliveryDate !== undefined) order.DeliveryDate = DeliveryDate;
+
+    if (TotalValue !== undefined) {
+      const newTotal = Number(TotalValue);
+      if (newTotal < order.Advance) {
+        return res.status(400).json({
+          message: "Total value cannot be less than the advance already received"
+        });
+      }
+      order.TotalValue = newTotal;
+      order.RemainingPayment = newTotal - order.Advance;
+    }
+
+    await order.save();
+
+    res.status(200).json({ message: "Order updated", order });
+  } catch (error) {
+    res.status(500).json({ message: "Error updating order", error: error.message });
+  }
+});
+
+// DELETE AN ORDER
+app.delete('/orders/:id', async (req, res) => {
+  try {
+    const order = await orders.findByIdAndDelete(req.params.id);
+    if (!order) {
+      return res.status(404).json({ message: "Order not found" });
+    }
+    res.status(200).json({ message: "Order deleted" });
+  } catch (error) {
+    res.status(500).json({ message: "Error deleting order", error: error.message });
+  }
+});
+
+// ADD AN ADVANCE PAYMENT TO AN EXISTING ORDER
+app.post('/orders/:id/advance', async (req, res) => {
+  try {
+    const { amount, mode, date } = req.body;
+    const amt = Number(amount);
+
+    if (!amt || amt <= 0) {
+      return res.status(400).json({ message: "Enter a valid advance amount" });
+    }
+
+    const order = await orders.findById(req.params.id);
+    if (!order) {
+      return res.status(404).json({ message: "Order not found" });
+    }
+
+    if (amt > order.RemainingPayment) {
+      return res.status(400).json({
+        message: `Amount cannot be more than the remaining payment (${order.RemainingPayment})`
+      });
+    }
+
+    order.Advance += amt;
+    order.RemainingPayment -= amt;
+    order.AdvanceHistory.push({ amount: amt, mode, date });
+
+    await order.save();
+
+    res.status(200).json({ message: "Advance recorded", order });
+  } catch (error) {
+    res.status(500).json({ message: "Error recording advance", error: error.message });
   }
 });
 
@@ -295,6 +386,59 @@ app.post("/newclient", async (req, res) => {
   }
 });
 
+// EDIT A CLIENT
+app.patch("/clients/:id", async (req, res) => {
+  try {
+    const { name, Add, Phone } = req.body;
+
+    if (!name || !Add || !Phone) {
+      return res.status(400).json({ message: "Name, address and phone are required" });
+    }
+    if (!/^\d{10}$/.test(Phone)) {
+      return res.status(400).json({ message: "Phone number must be 10 digits" });
+    }
+
+    const duplicate = await client.findOne({ Phone, _id: { $ne: req.params.id } });
+    if (duplicate) {
+      return res.status(409).json({ message: "Another client already uses this phone number" });
+    }
+
+    const updated = await client.findByIdAndUpdate(
+      req.params.id,
+      { name, Add, Phone },
+      { new: true }
+    );
+
+    if (!updated) {
+      return res.status(404).json({ message: "Client not found" });
+    }
+
+    res.status(200).json({ message: "Client updated", client: updated });
+  } catch (error) {
+    res.status(500).json({ message: "Error updating client", error: error.message });
+  }
+});
+
+// DELETE A CLIENT
+app.delete("/clients/:id", async (req, res) => {
+  try {
+    const existingOrders = await orders.countDocuments({ Client: req.params.id });
+    if (existingOrders > 0) {
+      return res.status(409).json({
+        message: "This client still has orders on record. Delete those orders first."
+      });
+    }
+
+    const deleted = await client.findByIdAndDelete(req.params.id);
+    if (!deleted) {
+      return res.status(404).json({ message: "Client not found" });
+    }
+
+    res.status(200).json({ message: "Client deleted" });
+  } catch (error) {
+    res.status(500).json({ message: "Error deleting client", error: error.message });
+  }
+});
 
 // GET ALL CLIENTS
 app.get("/allclients", async (req, res) => {
@@ -336,6 +480,7 @@ app.get("/allclients", async (req, res) => {
           BalanceDue: balanceDue,
 
           Orders: clientOrders.map(order => ({
+            _id: order._id,
             OrderID: order.OrderID,
             TotalValue: order.TotalValue,
             Advance: order.Advance,
@@ -391,7 +536,7 @@ const product = mongoose.model("Product", {
 
 });
 
-// ADDING NEW PRODUCT 
+// ADDING NEW PRODUCT
 app.post("/addproduct", async (req, res) => {
 
   try {
@@ -468,5 +613,3 @@ module.exports = app;
 if (require.main === module) {
   app.listen(port, () => console.log(`Listening on port ${port}`));
 }
-
-// deploy check)

@@ -236,6 +236,11 @@
   .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
   .calc { background: var(--green-soft); color: var(--green-dark); border-radius: 9px; padding: 10px 12px; font-size: 14px; margin: 0 0 14px; }
   .calc strong { font-weight: 600; font-variant-numeric: tabular-nums; }
+  .sheet { display: flex; flex-direction: column; gap: 4px; }
+  .sheet-item { text-align: left; background: none; border: 0; border-radius: 9px; padding: 12px 14px; font: inherit; font-weight: 500; color: var(--ink); cursor: pointer; }
+  .sheet-item:hover { background: var(--green-soft); color: var(--green-dark); }
+  .sheet-item.danger { color: var(--danger); }
+  .sheet-item.danger:hover { background: var(--danger-soft); }
   #toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: var(--black); color: #fff; padding: 11px 18px; border-radius: 10px; font-size: 14px; opacity: 0; pointer-events: none; transition: opacity .2s; border-left: 3px solid var(--green-bright); z-index: 60; }
   #toast.show { opacity: 1; }
   .scrim { display: none; }
@@ -608,7 +613,7 @@ function viewOrders() {
     <div id="list"></div>`;
   $('#add').onclick = openOrderForm;
   $('#q').oninput = e => { state.q = e.target.value; ordersTable(); };
-  $('#list').onclick = e => { const b = e.target.closest('[data-status]'); if (b) changeStatus(b.dataset.status); };
+  $('#list').onclick = e => { const b = e.target.closest('[data-actions]'); if (b) openOrderActions(b.dataset.actions); };
   $('#seg').onclick = e => {
     const b = e.target.closest('button'); if (!b) return;
     state.filter = b.dataset.f;
@@ -633,7 +638,7 @@ function ordersTable() {
       <td>${fmtDate(x.ReceivingDate)}</td><td>${fmtDate(x.DeliveryDate)}</td>
       <td class="num">${money(x.TotalValue)}</td><td class="num">${money(x.Advance)}</td><td class="num">${money(x.RemainingPayment)}</td>
       <td>${statusPill(x.Status)}</td>
-      <td class="num"><button class="btn sm" data-status="${esc(x._id)}">${x.Status === 'Active' ? 'Mark completed' : 'Reopen'}</button></td></tr>`).join('')}</tbody></table></div>`;
+      <td class="num"><button class="btn sm" data-actions="${esc(x._id)}">Actions</button></td></tr>`).join('')}</tbody></table></div>`;
 }
 
 async function setStatus(o, Status, markPaid) {
@@ -653,6 +658,66 @@ function changeStatus(id) {
   } else {
     setStatus(o, 'Completed').catch(e => toast(e.message));
   }
+}
+
+function openOrderActions(id) {
+  const o = state.orders.find(x => x._id === id);
+  if (!o) return;
+  const items = [
+    { label: 'Edit order', onClick: () => editOrderForm(o) },
+  ];
+  if (o.RemainingPayment > 0) {
+    items.push({ label: 'Add advance payment', onClick: () => addAdvanceForm(o) });
+  }
+  items.push({ label: o.Status === 'Active' ? 'Mark completed' : 'Reopen', onClick: () => changeStatus(o._id) });
+  items.push({ label: 'Delete order', danger: true, onClick: () => deleteOrder(o) });
+  openActionSheet(o.OrderID, items);
+}
+
+function editOrderForm(o) {
+  const fields = `
+    <div class="two">
+      <div class="field"><label for="ReceivingDate">Receiving date</label><input id="ReceivingDate" name="ReceivingDate" type="date" value="${esc(o.ReceivingDate)}" required></div>
+      <div class="field"><label for="DeliveryDate">Delivery date</label><input id="DeliveryDate" name="DeliveryDate" type="date" value="${esc(o.DeliveryDate)}" required></div>
+    </div>
+    <div class="field"><label for="TotalValue">Total value (₹)</label><input id="TotalValue" name="TotalValue" type="number" min="0" step="any" inputmode="decimal" value="${o.TotalValue}" required></div>
+    <p class="calc">Already received: <strong>${money(o.Advance)}</strong> · New remaining: <strong id="remain">${money(o.TotalValue - o.Advance)}</strong></p>`;
+  openForm(`Edit ${o.OrderID}`, fields, 'Save changes', async d => {
+    const total = +d.TotalValue;
+    if (total < o.Advance) throw new Error(`Total value can't be less than the ${money(o.Advance)} already received.`);
+    if (d.DeliveryDate < d.ReceivingDate) throw new Error('Delivery date cannot be before the receiving date.');
+    await api(`/orders/${encodeURIComponent(o._id)}`, 'PATCH', { ReceivingDate: d.ReceivingDate, DeliveryDate: d.DeliveryDate, TotalValue: total });
+    toast(`${o.OrderID} updated`);
+    await loadAll();
+  }, () => {
+    $('#TotalValue').oninput = () => { $('#remain').textContent = money((+$('#TotalValue').value || 0) - o.Advance); };
+  });
+}
+
+function addAdvanceForm(o) {
+  const fields = `
+    <p class="calc" style="margin-top:0">Remaining on this order: <strong>${money(o.RemainingPayment)}</strong></p>
+    <div class="field"><label for="amount">Advance amount (₹)</label><input id="amount" name="amount" type="number" min="0" max="${o.RemainingPayment}" step="any" inputmode="decimal" required></div>
+    <div class="two">
+      <div class="field"><label for="mode">Mode</label>
+        <select id="mode" name="mode"><option>Cash</option><option>UPI</option><option>Bank transfer</option><option>Cheque</option></select></div>
+      <div class="field"><label for="date">Date</label><input id="date" name="date" type="date" value="${today()}" required></div>
+    </div>`;
+  openForm(`Add advance — ${o.OrderID}`, fields, 'Add advance', async d => {
+    const amt = +d.amount;
+    if (!amt || amt <= 0) throw new Error('Enter a valid amount.');
+    if (amt > o.RemainingPayment) throw new Error(`Cannot be more than the remaining ${money(o.RemainingPayment)}.`);
+    await api(`/orders/${encodeURIComponent(o._id)}/advance`, 'POST', { amount: amt, mode: d.mode, date: d.date });
+    toast(`Advance of ${money(amt)} added to ${o.OrderID}`);
+    await loadAll();
+  });
+}
+
+function deleteOrder(o) {
+  if (!confirm(`Delete order ${o.OrderID}? This cannot be undone.`)) return;
+  api(`/orders/${encodeURIComponent(o._id)}`, 'DELETE')
+    .then(() => { toast(`${o.OrderID} deleted`); return loadAll(); })
+    .catch(e => toast(e.message));
 }
 
 function openOrderForm() {
@@ -699,6 +764,12 @@ function viewClients() {
     <div id="list"></div>`;
   $('#add').onclick = openClientForm;
   $('#q').oninput = e => { state.q = e.target.value; clientsList(); };
+  $('#list').onclick = e => {
+    const edit = e.target.closest('[data-edit-client]');
+    const del = e.target.closest('[data-delete-client]');
+    if (edit) { e.preventDefault(); editClientForm(edit.dataset.editClient); }
+    else if (del) { e.preventDefault(); deleteClient(del.dataset.deleteClient); }
+  };
   clientsList();
 }
 function clientsList() {
@@ -715,7 +786,13 @@ function clientsList() {
         <span>${esc(c.Phone)}</span><span>${c.TotalOrders}</span><span>${c.ActiveOrders}</span><span class="num strong">${money(c.BalanceDue)}</span>
       </summary>
       <div class="detail">
-        <p class="addr">${esc(c.Add)}</p>
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:12px">
+          <p class="addr" style="margin:0">${esc(c.Add)}</p>
+          <div style="display:flex;gap:8px;flex:none">
+            <button class="btn sm" data-edit-client="${esc(c._id)}">Edit</button>
+            <button class="btn sm" data-delete-client="${esc(c._id)}">Delete</button>
+          </div>
+        </div>
         ${c.Orders.length ? `<div class="wrap"><table>
           <thead><tr><th>Order</th><th>Delivery</th><th class="num">Total</th><th class="num">Advance</th><th class="num">Remaining</th><th>Status</th></tr></thead>
           <tbody>${c.Orders.map(o => `<tr><td class="strong">${esc(o.OrderID)}</td><td>${fmtDate(o.DeliveryDate)}</td>
@@ -733,6 +810,29 @@ function openClientForm() {
     toast('Client added');
     await loadAll();
   });
+}
+
+function editClientForm(id) {
+  const c = state.clients.find(x => x._id === id);
+  if (!c) return;
+  const fields = `
+    <div class="field"><label for="name">Name</label><input id="name" name="name" value="${esc(c.name)}" required></div>
+    <div class="field"><label for="Phone">Phone</label><input id="Phone" name="Phone" inputmode="numeric" maxlength="10" pattern="\\d{10}" title="10 digits" value="${esc(c.Phone)}" required></div>
+    <div class="field"><label for="Add">Address</label><input id="Add" name="Add" value="${esc(c.Add)}" required></div>`;
+  openForm(`Edit ${c.name}`, fields, 'Save changes', async d => {
+    await api(`/clients/${encodeURIComponent(c._id)}`, 'PATCH', d);
+    toast('Client updated');
+    await loadAll();
+  });
+}
+
+function deleteClient(id) {
+  const c = state.clients.find(x => x._id === id);
+  if (!c) return;
+  if (!confirm(`Delete client ${c.name}? This cannot be undone.`)) return;
+  api(`/clients/${encodeURIComponent(c._id)}`, 'DELETE')
+    .then(() => { toast(`${c.name} deleted`); return loadAll(); })
+    .catch(e => toast(e.message));
 }
 
 /* ================= PRODUCTS ================= */
@@ -789,6 +889,18 @@ function openForm(title, fields, submitLabel, onSubmit, afterOpen) {
   };
   dlg.showModal();
   if (afterOpen) afterOpen();
+}
+
+function openActionSheet(title, items) {
+  const dlg = $('#dlg');
+  dlg.innerHTML = `<h2>${esc(title)}</h2>
+    <div class="sheet">${items.map((it, i) => `<button type="button" class="sheet-item${it.danger ? ' danger' : ''}" data-i="${i}">${esc(it.label)}</button>`).join('')}</div>
+    <div class="actions"><button type="button" class="btn" id="cancel">Close</button></div>`;
+  $('#cancel').onclick = () => dlg.close();
+  dlg.querySelectorAll('.sheet-item').forEach(btn => {
+    btn.onclick = () => { dlg.close(); items[+btn.dataset.i].onClick(); };
+  });
+  dlg.showModal();
 }
 
 /* ---------- boot ---------- */
