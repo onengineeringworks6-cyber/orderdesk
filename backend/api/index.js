@@ -139,6 +139,14 @@ const orders = mongoose.model("Orders", {
     default: "Active"
   },
 
+  // Production/delivery roadmap step: 1 Buying raw material,
+  // 2 Processing raw material, 3 Completion of order, 4 Delivery of order
+  Stage: {
+    type: Number,
+    enum: [1, 2, 3, 4],
+    default: 1
+  },
+
   // History of every advance payment made against this order,
   // including the initial one taken when the order was created.
   AdvanceHistory: [{
@@ -162,10 +170,19 @@ app.post("/neworder", async (req, res) => {
     } = req.body;
 
     // Count existing orders
-    const orderCount = await orders.countDocuments();
+    const yearPrefix = `ORD-${new Date().getFullYear()}-`;
+    // Base the next number on the highest existing order number for this year,
+    // not a document count — a count can go backward after deletions and
+    // collide with an OrderID that still exists (unique constraint failure).
+    const latest = await orders.findOne({ OrderID: { $regex: `^${yearPrefix}` } }).sort({ OrderID: -1 });
+    let nextNum = 1;
+    if (latest) {
+      const n = parseInt(latest.OrderID.slice(yearPrefix.length), 10);
+      if (!isNaN(n)) nextNum = n + 1;
+    }
 
     // Generate human-readable ID
-    const OrderID = `ORD-${new Date().getFullYear()}-${String(orderCount + 1).padStart(4, "0")}`;
+    const OrderID = `${yearPrefix}${String(nextNum).padStart(4, "0")}`;
 
     const newOrder = new orders({
       OrderID,
@@ -309,6 +326,28 @@ app.patch('/orders/:id/status', async (req, res) => {
     res.status(200).json({ message: "Order updated", order });
   } catch (error) {
     res.status(500).json({ message: "Error updating order", error: error.message });
+  }
+});
+
+// UPDATE ORDER STAGE (roadmap: 1 Buying raw material, 2 Processing raw material,
+// 3 Completion of order, 4 Delivery of order)
+app.patch('/orders/:id/stage', async (req, res) => {
+  try {
+    const step = Number(req.body.Stage);
+
+    if (![1, 2, 3, 4].includes(step)) {
+      return res.status(400).json({ message: "Stage must be 1, 2, 3, or 4" });
+    }
+
+    const order = await orders.findByIdAndUpdate(req.params.id, { Stage: step }, { new: true });
+
+    if (!order) {
+      return res.status(404).json({ message: "Order not found" });
+    }
+
+    res.status(200).json({ message: "Stage updated", order });
+  } catch (error) {
+    res.status(500).json({ message: "Error updating stage", error: error.message });
   }
 });
 
