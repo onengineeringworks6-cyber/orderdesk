@@ -188,6 +188,10 @@
   .pill { display: inline-block; font-size: 12px; font-weight: 500; padding: 3px 10px; border-radius: 99px; background: var(--green-soft); color: var(--green); white-space: nowrap; }
   .pill.done { background: var(--black); color: #fff; }
   .pill.late { background: var(--danger-soft); color: var(--danger); }
+  .pill.type-new { background: var(--green-soft); color: var(--green-dark); }
+  .pill.type-labour { background: #eaf0fb; color: #2451b3; }
+  .pill.type-repair { background: #fdf2e3; color: #a15c07; }
+  .pill.type-trading { background: #f3eafd; color: #6a2bb0; }
 
   /* ---------- tables / lists ---------- */
   .toolbar { display: flex; gap: 12px; margin-bottom: 14px; align-items: center; flex-wrap: wrap; }
@@ -430,16 +434,62 @@ async function api(path, method = 'GET', body) {
 const state = { view: 'dashboard', orders: [], clients: [], products: [], filter: 'All', q: '' };
 const clientName = id => (state.clients.find(c => c._id === id) || {}).name || 'Unknown client';
 const statusPill = s => `<span class="pill ${s === 'Completed' ? 'done' : ''}">${esc(s)}</span>`;
-const STAGES = ['Buying raw material', 'Processing raw material', 'Completion of order', 'Delivery of order'];
-function stageDots(stage) {
-  stage = stage || 1;
-  const parts = [1, 2, 3, 4].map((i, idx) => {
+
+/* Order types drive which stage roadmap and which extra fields apply. */
+const ORDER_TYPES = ['New Order', 'Labour Job', 'Repairing', 'Trading'];
+const STAGE_SETS = {
+  'New Order': ['Buying raw material', 'Processing raw material', 'Completion of order', 'Delivery of order'],
+  'Labour Job': ['Raw material received', 'Processing / job work', 'Completion of order', 'Delivery of order'],
+  'Repairing': ['Machine received', 'Diagnosis / repair in progress', 'Repair completed', 'Delivered to client'],
+  'Trading': ['Item purchased', 'Ready for delivery', 'Delivered to client']
+};
+const TYPE_SHORT = { 'New Order': 'New', 'Labour Job': 'Labour', 'Repairing': 'Repair', 'Trading': 'Trading' };
+const typePill = t => `<span class="pill type-${(TYPE_SHORT[t] || 'New').toLowerCase()}">${esc(TYPE_SHORT[t] || 'New')}</span>`;
+const orderTitle = o => o.OrderName && o.OrderName !== o.OrderID ? o.OrderName : o.OrderID;
+function stageDots(stage, type) {
+  const stages = STAGE_SETS[type] || STAGE_SETS['New Order'];
+  stage = Math.min(stage || 1, stages.length);
+  const n = stages.length;
+  const parts = Array.from({ length: n }, (_, idx) => {
+    const i = idx + 1;
     const dot = `<span class="dot${i <= stage ? ' on' : ''}"></span>`;
-    const ln = idx < 3 ? `<span class="ln${i < stage ? ' on' : ''}"></span>` : '';
+    const ln = idx < n - 1 ? `<span class="ln${i < stage ? ' on' : ''}"></span>` : '';
     return dot + ln;
   }).join('');
-  return `<div class="cellc" title="${esc(STAGES[stage - 1])} (step ${stage} of 4)">
-    <div class="stage-dots">${parts}</div><span class="stage-label">${esc(STAGES[stage - 1])}</span></div>`;
+  return `<div class="cellc" title="${esc(stages[stage - 1])} (step ${stage} of ${n})">
+    <div class="stage-dots">${parts}</div><span class="stage-label">${esc(stages[stage - 1])}</span></div>`;
+}
+
+/* ---------- derived data (always computed fresh from state.orders,
+   so a local order patch instantly keeps client/dashboard stats correct
+   without needing a server round-trip) ---------- */
+const clientOrders = id => state.orders.filter(o => o.Client === id);
+function clientStats(id) {
+  const os = clientOrders(id);
+  return {
+    TotalOrders: os.length,
+    ActiveOrders: os.filter(o => o.Status === 'Active').length,
+    BalanceDue: sum(os, 'RemainingPayment')
+  };
+}
+/* ---------- local state patches (avoid a full reload after every edit) ---------- */
+function patchOrder(updated) {
+  const i = state.orders.findIndex(x => x._id === updated._id);
+  if (i > -1) state.orders[i] = updated; else state.orders.unshift(updated);
+  render();
+}
+function removeOrder(id) {
+  state.orders = state.orders.filter(x => x._id !== id);
+  render();
+}
+function patchClient(updated) {
+  const i = state.clients.findIndex(x => x._id === updated._id);
+  if (i > -1) state.clients[i] = { ...state.clients[i], ...updated }; else state.clients.push(updated);
+  render();
+}
+function removeClient(id) {
+  state.clients = state.clients.filter(x => x._id !== id);
+  render();
 }
 
 /* ---------- auth ---------- */
@@ -528,7 +578,7 @@ function viewDashboard() {
   const t0 = new Date(); t0.setHours(0, 0, 0, 0);
   const overdue = active.filter(x => ts(x.DeliveryDate) < t0.getTime()).length;
   const upcoming = active.slice().sort((a, b) => ts(a.DeliveryDate) - ts(b.DeliveryDate)).slice(0, 5);
-  const topDue = c.filter(x => x.BalanceDue > 0).sort((a, b) => b.BalanceDue - a.BalanceDue).slice(0, 5);
+  const topDue = c.map(x => ({ ...x, ...clientStats(x._id) })).filter(x => x.BalanceDue > 0).sort((a, b) => b.BalanceDue - a.BalanceDue).slice(0, 5);
   const recent = o.slice(0, 5);
   const hour = new Date().getHours();
   const greet = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
@@ -581,11 +631,12 @@ function viewDashboard() {
     <div class="card" style="padding:0">
       <div class="card-head" style="padding:20px 20px 0"><h3>Recent orders</h3><button class="link" data-goto="orders">See all</button></div>
       ${recent.length ? `<div class="wrap plain"><table>
-        <thead><tr><th>Order</th><th>Client</th><th>Delivery</th><th class="num">Total</th><th class="num">Remaining</th><th>Status</th><th>Stage</th></tr></thead>
-        <tbody>${recent.map(x => `<tr><td class="strong">${esc(x.OrderID)}</td>
+        <thead><tr><th>Order</th><th>Client</th><th>Type</th><th>Delivery</th><th class="num">Total</th><th class="num">Remaining</th><th>Status</th><th>Stage</th></tr></thead>
+        <tbody>${recent.map(x => `<tr><td class="strong">${esc(orderTitle(x))}</td>
           <td><div class="cellc"><span class="av sm">${initial(clientName(x.Client))}</span>${esc(clientName(x.Client))}</div></td>
+          <td>${typePill(x.OrderType)}</td>
           <td>${fmtDate(x.DeliveryDate)}</td><td class="num">${money(x.TotalValue)}</td><td class="num">${money(x.RemainingPayment)}</td>
-          <td>${statusPill(x.Status)}</td><td>${stageDots(x.Stage)}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty"><p>No orders yet.</p></div>'}
+          <td>${statusPill(x.Status)}</td><td>${stageDots(x.Stage, x.OrderType)}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty"><p>No orders yet.</p></div>'}
     </div>`;
   $('#add').onclick = openOrderForm;
 }
@@ -628,7 +679,7 @@ function viewOrders() {
     <div class="head"><div><h1 class="title">Orders</h1><p>${o.length} total, ${o.filter(x => x.Status === 'Active').length} active</p></div>
       <button class="btn primary" id="add"><span data-icon="plus"></span>New order</button></div>
     <div class="toolbar">
-      <input type="search" id="q" placeholder="Search by order ID or client" aria-label="Search orders" value="${esc(state.q)}">
+      <input type="search" id="q" placeholder="Search by order name, ID or client" aria-label="Search orders" value="${esc(state.q)}">
       <div class="seg" id="seg">${['All', 'Active', 'Completed'].map(f => `<button data-f="${f}" aria-pressed="${state.filter === f}">${f}</button>`).join('')}</div>
     </div>
     <div id="list"></div>`;
@@ -646,72 +697,108 @@ function viewOrders() {
 function ordersTable() {
   const q = state.q.trim().toLowerCase();
   const rows = state.orders.filter(x => (state.filter === 'All' || x.Status === state.filter) &&
-    (!q || x.OrderID.toLowerCase().includes(q) || clientName(x.Client).toLowerCase().includes(q)));
+    (!q || x.OrderID.toLowerCase().includes(q) || (x.OrderName || '').toLowerCase().includes(q) || clientName(x.Client).toLowerCase().includes(q)));
   if (!rows.length) {
     $('#list').innerHTML = `<div class="wrap"><div class="empty"><p>${state.orders.length ? 'No orders match your search.' : 'No orders yet. Create the first one.'}</p></div></div>`;
     return;
   }
   $('#list').innerHTML = `<div class="wrap"><table>
-    <thead><tr><th>Order</th><th>Client</th><th>Received</th><th>Delivery</th><th class="num">Total</th><th class="num">Advance</th><th class="num">Remaining</th><th>Status</th><th>Stage</th><th></th></tr></thead>
+    <thead><tr><th>Order</th><th>Client</th><th>Type</th><th>Received</th><th>Delivery</th><th class="num">Total</th><th class="num">Advance</th><th class="num">Remaining</th><th>Status</th><th>Stage</th><th></th></tr></thead>
     <tbody>${rows.map(x => `<tr>
-      <td class="strong">${esc(x.OrderID)}</td>
+      <td class="strong">${esc(orderTitle(x))}${x.OrderName && x.OrderName !== x.OrderID ? `<br><span class="muted" style="font-weight:400;font-size:12px">${esc(x.OrderID)}</span>` : ''}</td>
       <td><div class="cellc"><span class="av sm">${initial(clientName(x.Client))}</span>${esc(clientName(x.Client))}</div></td>
+      <td>${typePill(x.OrderType)}</td>
       <td>${fmtDate(x.ReceivingDate)}</td><td>${fmtDate(x.DeliveryDate)}</td>
       <td class="num">${money(x.TotalValue)}</td><td class="num">${money(x.Advance)}</td><td class="num">${money(x.RemainingPayment)}</td>
       <td>${statusPill(x.Status)}</td>
-      <td>${stageDots(x.Stage)}</td>
+      <td>${stageDots(x.Stage, x.OrderType)}</td>
       <td class="num"><button class="btn sm" data-actions="${esc(x._id)}">Actions</button></td></tr>`).join('')}</tbody></table></div>`;
 }
 
-async function setStatus(o, Status, markPaid) {
-  await api(`/orders/${encodeURIComponent(o._id)}/status`, 'PATCH', { Status, markPaid: !!markPaid });
-  toast(Status === 'Completed' ? `${o.OrderID} marked completed` : `${o.OrderID} reopened`);
-  await loadAll();
+function itemLabel(type) {
+  return { 'New Order': 'Item / product (optional)', 'Labour Job': 'Raw material / item received', 'Repairing': 'Machine / item being repaired', 'Trading': 'Item name' }[type] || 'Item details';
 }
-function changeStatus(id) {
-  const o = state.orders.find(x => x._id === id);
-  if (!o) return;
-  if (o.Status === 'Completed') { setStatus(o, 'Active').catch(e => toast(e.message)); return; }
-  if (o.RemainingPayment > 0) {
-    openForm(`Complete ${o.OrderID}`,
-      `<p class="muted" style="margin-top:0">${esc(clientName(o.Client))} still owes ${money(o.RemainingPayment)} on this order.</p>
-       <div class="field"><label class="chk"><input type="checkbox" name="markPaid" checked> The remaining ${money(o.RemainingPayment)} has been received</label></div>`,
-      'Mark completed', d => setStatus(o, 'Completed', d.markPaid === 'on'));
-  } else {
-    setStatus(o, 'Completed').catch(e => toast(e.message));
-  }
+function receivingLabel(type) {
+  return { 'New Order': 'Order received', 'Labour Job': 'Material received', 'Repairing': 'Machine received', 'Trading': 'Purchase date' }[type] || 'Receiving date';
 }
+function deliveryLabel(type) { return type === 'Repairing' ? 'Expected return date' : 'Delivery date'; }
+function totalLabel(type) { return type === 'Repairing' ? 'Final billed amount (₹)' : type === 'Trading' ? 'Selling price (₹)' : 'Total value (₹)'; }
 
 function openOrderActions(id) {
   const o = state.orders.find(x => x._id === id);
   if (!o) return;
-  const items = [
-    { label: 'Edit order', onClick: () => editOrderForm(o) },
-    { label: 'Update production stage', onClick: () => openStageSheet(o) },
-  ];
-  if (o.RemainingPayment > 0) {
-    items.push({ label: 'Add advance payment', onClick: () => addAdvanceForm(o) });
-  }
-  items.push({ label: o.Status === 'Active' ? 'Mark completed' : 'Reopen', onClick: () => changeStatus(o._id) });
-  items.push({ label: 'Delete order', danger: true, onClick: () => deleteOrder(o) });
-  openActionSheet(o.OrderID, items);
+  const stages = STAGE_SETS[o.OrderType] || STAGE_SETS['New Order'];
+  const dlg = $('#dlg');
+  dlg.innerHTML = `<h2>${esc(orderTitle(o))}</h2>
+    <p class="muted" style="margin-top:-14px;margin-bottom:18px">${esc(o.OrderID)} · ${esc(o.OrderType)}</p>
+    <div class="two">
+      <div class="field"><label for="ordStatus">Status</label>
+        <select id="ordStatus">${['Active', 'Completed'].map(s => `<option value="${s}" ${o.Status === s ? 'selected' : ''}>${s}</option>`).join('')}</select></div>
+      <div class="field"><label for="ordStage">Stage</label>
+        <select id="ordStage">${stages.map((label, i) => `<option value="${i + 1}" ${o.Stage === i + 1 ? 'selected' : ''}>${i + 1}. ${esc(label)}</option>`).join('')}</select></div>
+    </div>
+    <div class="sheet" style="margin-top:4px">
+      <button type="button" class="sheet-item" id="editBtn">Edit order details</button>
+      ${o.RemainingPayment > 0 ? `<button type="button" class="sheet-item" id="advBtn">Add advance payment</button>` : ''}
+      <button type="button" class="sheet-item danger" id="delBtn">Delete order</button>
+    </div>
+    <div class="actions"><button type="button" class="btn" id="cancel">Close</button></div>`;
+  $('#cancel').onclick = () => dlg.close();
+  $('#editBtn').onclick = () => { dlg.close(); editOrderForm(o); };
+  const advBtn = $('#advBtn'); if (advBtn) advBtn.onclick = () => { dlg.close(); addAdvanceForm(o); };
+  $('#delBtn').onclick = () => { dlg.close(); deleteOrder(o); };
+
+  // Dropdowns apply immediately on change — no separate submit step, and
+  // only the affected order is patched into local state (no full reload).
+  $('#ordStatus').onchange = async e => {
+    const val = e.target.value;
+    if (val === o.Status) return;
+    let markPaid = false;
+    if (val === 'Completed' && o.RemainingPayment > 0) {
+      markPaid = confirm(`${clientName(o.Client)} still owes ${money(o.RemainingPayment)}. Mark it as received too?`);
+    }
+    try {
+      const r = await api(`/orders/${encodeURIComponent(o._id)}/status`, 'PATCH', { Status: val, markPaid });
+      toast(val === 'Completed' ? `${orderTitle(o)} marked completed` : `${orderTitle(o)} reopened`);
+      dlg.close();
+      patchOrder(r.order);
+    } catch (err) { toast(err.message); e.target.value = o.Status; }
+  };
+  $('#ordStage').onchange = async e => {
+    const step = +e.target.value;
+    if (step === o.Stage) return;
+    try {
+      const r = await api(`/orders/${encodeURIComponent(o._id)}/stage`, 'PATCH', { Stage: step });
+      toast(`${orderTitle(o)} moved to "${stages[step - 1]}"`);
+      dlg.close();
+      patchOrder(r.order);
+    } catch (err) { toast(err.message); e.target.value = o.Stage; }
+  };
+  dlg.showModal();
 }
 
 function editOrderForm(o) {
   const fields = `
+    <div class="field"><label for="OrderName">Order name</label><input id="OrderName" name="OrderName" value="${esc(o.OrderName && o.OrderName !== o.OrderID ? o.OrderName : '')}" placeholder="${esc(o.OrderID)}"></div>
+    <div class="field"><label for="ItemDetails">${esc(itemLabel(o.OrderType))}</label><input id="ItemDetails" name="ItemDetails" value="${esc(o.ItemDetails || '')}"></div>
     <div class="two">
-      <div class="field"><label for="ReceivingDate">Receiving date</label><input id="ReceivingDate" name="ReceivingDate" type="date" value="${esc(o.ReceivingDate)}" required></div>
-      <div class="field"><label for="DeliveryDate">Delivery date</label><input id="DeliveryDate" name="DeliveryDate" type="date" value="${esc(o.DeliveryDate)}" required></div>
+      <div class="field"><label for="ReceivingDate">${esc(receivingLabel(o.OrderType))}</label><input id="ReceivingDate" name="ReceivingDate" type="date" value="${esc(o.ReceivingDate)}" required></div>
+      <div class="field"><label for="DeliveryDate">${esc(deliveryLabel(o.OrderType))}</label><input id="DeliveryDate" name="DeliveryDate" type="date" value="${esc(o.DeliveryDate)}" required></div>
     </div>
-    <div class="field"><label for="TotalValue">Total value (₹)</label><input id="TotalValue" name="TotalValue" type="number" min="0" step="any" inputmode="decimal" value="${o.TotalValue}" required></div>
+    ${o.OrderType === 'Repairing' ? `<div class="field"><label for="EstimatedCost">Estimated cost (₹)</label><input id="EstimatedCost" name="EstimatedCost" type="number" min="0" step="any" inputmode="decimal" value="${o.EstimatedCost || 0}"></div>` : ''}
+    ${o.OrderType === 'Trading' ? `<div class="field"><label for="PurchaseCost">Purchase cost (₹)</label><input id="PurchaseCost" name="PurchaseCost" type="number" min="0" step="any" inputmode="decimal" value="${o.PurchaseCost || 0}"></div>` : ''}
+    <div class="field"><label for="TotalValue">${esc(totalLabel(o.OrderType))}</label><input id="TotalValue" name="TotalValue" type="number" min="0" step="any" inputmode="decimal" value="${o.TotalValue}" required></div>
     <p class="calc">Already received: <strong>${money(o.Advance)}</strong> · New remaining: <strong id="remain">${money(o.TotalValue - o.Advance)}</strong></p>`;
-  openForm(`Edit ${o.OrderID}`, fields, 'Save changes', async d => {
+  openForm(`Edit ${orderTitle(o)}`, fields, 'Save changes', async d => {
     const total = +d.TotalValue;
     if (total < o.Advance) throw new Error(`Total value can't be less than the ${money(o.Advance)} already received.`);
     if (d.DeliveryDate < d.ReceivingDate) throw new Error('Delivery date cannot be before the receiving date.');
-    await api(`/orders/${encodeURIComponent(o._id)}`, 'PATCH', { ReceivingDate: d.ReceivingDate, DeliveryDate: d.DeliveryDate, TotalValue: total });
-    toast(`${o.OrderID} updated`);
-    await loadAll();
+    const r = await api(`/orders/${encodeURIComponent(o._id)}`, 'PATCH', {
+      OrderName: d.OrderName, ReceivingDate: d.ReceivingDate, DeliveryDate: d.DeliveryDate, TotalValue: total,
+      ItemDetails: d.ItemDetails, EstimatedCost: d.EstimatedCost, PurchaseCost: d.PurchaseCost
+    });
+    toast(`${orderTitle(o)} updated`);
+    patchOrder(r.order);
   }, () => {
     $('#TotalValue').oninput = () => { $('#remain').textContent = money((+$('#TotalValue').value || 0) - o.Advance); };
   });
@@ -726,20 +813,20 @@ function addAdvanceForm(o) {
         <select id="mode" name="mode"><option>Cash</option><option>UPI</option><option>Bank transfer</option><option>Cheque</option></select></div>
       <div class="field"><label for="date">Date</label><input id="date" name="date" type="date" value="${today()}" required></div>
     </div>`;
-  openForm(`Add advance — ${o.OrderID}`, fields, 'Add advance', async d => {
+  openForm(`Add advance — ${orderTitle(o)}`, fields, 'Add advance', async d => {
     const amt = +d.amount;
     if (!amt || amt <= 0) throw new Error('Enter a valid amount.');
     if (amt > o.RemainingPayment) throw new Error(`Cannot be more than the remaining ${money(o.RemainingPayment)}.`);
-    await api(`/orders/${encodeURIComponent(o._id)}/advance`, 'POST', { amount: amt, mode: d.mode, date: d.date });
-    toast(`Advance of ${money(amt)} added to ${o.OrderID}`);
-    await loadAll();
+    const r = await api(`/orders/${encodeURIComponent(o._id)}/advance`, 'POST', { amount: amt, mode: d.mode, date: d.date });
+    toast(`Advance of ${money(amt)} added to ${orderTitle(o)}`);
+    patchOrder(r.order);
   });
 }
 
 function deleteOrder(o) {
-  if (!confirm(`Delete order ${o.OrderID}? This cannot be undone.`)) return;
+  if (!confirm(`Delete order ${orderTitle(o)}? This cannot be undone.`)) return;
   api(`/orders/${encodeURIComponent(o._id)}`, 'DELETE')
-    .then(() => { toast(`${o.OrderID} deleted`); return loadAll(); })
+    .then(() => { toast(`${orderTitle(o)} deleted`); removeOrder(o._id); })
     .catch(e => toast(e.message));
 }
 
@@ -749,14 +836,20 @@ function openOrderForm() {
     go('clients'); return;
   }
   const fields = `
+    <div class="field"><label for="OrderType">Order type</label>
+      <select id="OrderType" name="OrderType">${ORDER_TYPES.map(t => `<option value="${esc(t)}">${esc(t)}</option>`).join('')}</select></div>
+    <div class="field"><label for="OrderName">Order name (optional)</label><input id="OrderName" name="OrderName" placeholder="e.g. Gate hinges — Sharma Steel"></div>
     <div class="field"><label for="Client">Client</label>
       <select id="Client" name="Client" required>${state.clients.map(c => `<option value="${esc(c._id)}">${esc(c.name)} (${esc(c.Phone)})</option>`).join('')}</select></div>
+    <div class="field"><label for="ItemDetails" id="itemLbl">Item details</label><input id="ItemDetails" name="ItemDetails"></div>
     <div class="two">
-      <div class="field"><label for="ReceivingDate">Receiving date</label><input id="ReceivingDate" name="ReceivingDate" type="date" value="${today()}" required></div>
-      <div class="field"><label for="DeliveryDate">Delivery date</label><input id="DeliveryDate" name="DeliveryDate" type="date" required></div>
+      <div class="field"><label for="ReceivingDate" id="recvLbl">Receiving date</label><input id="ReceivingDate" name="ReceivingDate" type="date" value="${today()}" required></div>
+      <div class="field"><label for="DeliveryDate" id="delivLbl">Delivery date</label><input id="DeliveryDate" name="DeliveryDate" type="date" required></div>
     </div>
+    <div class="field" id="estWrap" hidden><label for="EstimatedCost">Estimated cost (₹)</label><input id="EstimatedCost" name="EstimatedCost" type="number" min="0" step="any" inputmode="decimal" value="0"></div>
+    <div class="field" id="purWrap" hidden><label for="PurchaseCost">Purchase cost (₹)</label><input id="PurchaseCost" name="PurchaseCost" type="number" min="0" step="any" inputmode="decimal" value="0"></div>
     <div class="two">
-      <div class="field"><label for="TotalValue">Total value (₹)</label><input id="TotalValue" name="TotalValue" type="number" min="0" step="any" inputmode="decimal" required></div>
+      <div class="field"><label for="TotalValue" id="totalLbl">Total value (₹)</label><input id="TotalValue" name="TotalValue" type="number" min="0" step="any" inputmode="decimal" required></div>
       <div class="field"><label for="Advance">Advance (₹)</label><input id="Advance" name="Advance" type="number" min="0" step="any" inputmode="decimal" value="0" required></div>
     </div>
     <div class="two">
@@ -769,19 +862,31 @@ function openOrderForm() {
     const total = +d.TotalValue, adv = +d.Advance;
     if (adv > total) throw new Error('Advance cannot be more than the total value.');
     if (d.DeliveryDate < d.ReceivingDate) throw new Error('Delivery date cannot be before the receiving date.');
-    const r = await api('/neworder', 'POST', { ...d, TotalValue: total, Advance: adv });
+    const r = await api('/neworder', 'POST', { ...d, TotalValue: total, Advance: adv, EstimatedCost: +d.EstimatedCost || 0, PurchaseCost: +d.PurchaseCost || 0 });
     toast(`Order ${r.order.OrderID} created`);
-    await loadAll();
+    patchOrder(r.order);
   }, () => {
     const upd = () => { $('#remain').textContent = money((+$('#TotalValue').value || 0) - (+$('#Advance').value || 0)); };
     $('#TotalValue').oninput = upd; $('#Advance').oninput = upd;
+    const applyType = () => {
+      const t = $('#OrderType').value;
+      $('#itemLbl').textContent = itemLabel(t);
+      $('#recvLbl').textContent = receivingLabel(t);
+      $('#delivLbl').textContent = deliveryLabel(t);
+      $('#totalLbl').textContent = totalLabel(t);
+      $('#estWrap').hidden = t !== 'Repairing';
+      $('#purWrap').hidden = t !== 'Trading';
+    };
+    $('#OrderType').onchange = applyType;
+    applyType();
   });
 }
 
 /* ================= CLIENTS ================= */
 function viewClients() {
+  const totalDue = sum(state.orders, 'RemainingPayment');
   $('#view').innerHTML = `
-    <div class="head"><div><h1 class="title">Clients</h1><p>${state.clients.length} clients, ${money(sum(state.clients, 'BalanceDue'))} outstanding</p></div>
+    <div class="head"><div><h1 class="title">Clients</h1><p>${state.clients.length} clients, ${money(totalDue)} outstanding</p></div>
       <button class="btn primary" id="add"><span data-icon="plus"></span>New client</button></div>
     <div class="toolbar"><input type="search" id="q" placeholder="Search by name or phone" aria-label="Search clients" value="${esc(state.q)}"></div>
     <div id="list"></div>`;
@@ -804,9 +909,12 @@ function clientsList() {
   }
   $('#list').innerHTML = `<div class="wrap">
     <div class="list-head grid"><span>Name</span><span>Phone</span><span>Orders</span><span>Active</span><span class="num">Balance due</span></div>
-    ${rows.map(c => `<details class="row"><summary class="grid">
+    ${rows.map(c => {
+      const stats = clientStats(c._id);
+      const os = clientOrders(c._id);
+      return `<details class="row"><summary class="grid">
         <span class="cellc"><span class="av sm">${initial(c.name)}</span><span class="strong">${esc(c.name)}</span></span>
-        <span>${esc(c.Phone)}</span><span>${c.TotalOrders}</span><span>${c.ActiveOrders}</span><span class="num strong">${money(c.BalanceDue)}</span>
+        <span>${esc(c.Phone)}</span><span>${stats.TotalOrders}</span><span>${stats.ActiveOrders}</span><span class="num strong">${money(stats.BalanceDue)}</span>
       </summary>
       <div class="detail">
         <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:12px">
@@ -816,12 +924,13 @@ function clientsList() {
             <button class="btn sm" data-delete-client="${esc(c._id)}">Delete</button>
           </div>
         </div>
-        ${c.Orders.length ? `<div class="wrap"><table>
-          <thead><tr><th>Order</th><th>Delivery</th><th class="num">Total</th><th class="num">Advance</th><th class="num">Remaining</th><th>Status</th><th>Stage</th></tr></thead>
-          <tbody>${c.Orders.map(o => `<tr><td class="strong">${esc(o.OrderID)}</td><td>${fmtDate(o.DeliveryDate)}</td>
+        ${os.length ? `<div class="wrap"><table>
+          <thead><tr><th>Order</th><th>Type</th><th>Delivery</th><th class="num">Total</th><th class="num">Advance</th><th class="num">Remaining</th><th>Status</th><th>Stage</th></tr></thead>
+          <tbody>${os.map(o => `<tr><td class="strong">${esc(orderTitle(o))}</td><td>${typePill(o.OrderType)}</td><td>${fmtDate(o.DeliveryDate)}</td>
             <td class="num">${money(o.TotalValue)}</td><td class="num">${money(o.Advance)}</td><td class="num">${money(o.RemainingPayment)}</td>
-            <td>${statusPill(o.Status)}</td><td>${stageDots(o.Stage)}</td></tr>`).join('')}</tbody></table></div>` : '<p class="muted" style="margin:0">No orders yet for this client.</p>'}
-      </div></details>`).join('')}</div>`;
+            <td>${statusPill(o.Status)}</td><td>${stageDots(o.Stage, o.OrderType)}</td></tr>`).join('')}</tbody></table></div>` : '<p class="muted" style="margin:0">No orders yet for this client.</p>'}
+      </div></details>`;
+    }).join('')}</div>`;
 }
 function openClientForm() {
   const fields = `
@@ -829,9 +938,9 @@ function openClientForm() {
     <div class="field"><label for="Phone">Phone</label><input id="Phone" name="Phone" inputmode="numeric" maxlength="10" pattern="\\d{10}" title="10 digits" required></div>
     <div class="field"><label for="Add">Address</label><input id="Add" name="Add" required></div>`;
   openForm('New client', fields, 'Add client', async d => {
-    await api('/newclient', 'POST', d);
+    const r = await api('/newclient', 'POST', d);
     toast('Client added');
-    await loadAll();
+    patchClient(r.client);
   });
 }
 
@@ -843,9 +952,9 @@ function editClientForm(id) {
     <div class="field"><label for="Phone">Phone</label><input id="Phone" name="Phone" inputmode="numeric" maxlength="10" pattern="\\d{10}" title="10 digits" value="${esc(c.Phone)}" required></div>
     <div class="field"><label for="Add">Address</label><input id="Add" name="Add" value="${esc(c.Add)}" required></div>`;
   openForm(`Edit ${c.name}`, fields, 'Save changes', async d => {
-    await api(`/clients/${encodeURIComponent(c._id)}`, 'PATCH', d);
+    const r = await api(`/clients/${encodeURIComponent(c._id)}`, 'PATCH', d);
     toast('Client updated');
-    await loadAll();
+    patchClient(r.client);
   });
 }
 
@@ -854,7 +963,7 @@ function deleteClient(id) {
   if (!c) return;
   if (!confirm(`Delete client ${c.name}? This cannot be undone.`)) return;
   api(`/clients/${encodeURIComponent(c._id)}`, 'DELETE')
-    .then(() => { toast(`${c.name} deleted`); return loadAll(); })
+    .then(() => { toast(`${c.name} deleted`); removeClient(c._id); })
     .catch(e => toast(e.message));
 }
 
@@ -889,7 +998,8 @@ function openProductForm() {
   openForm('New product', fields, 'Add product', async d => {
     const r = await api('/addproduct', 'POST', d);
     toast(`Product ${r.product.ProductID} added`);
-    await loadAll();
+    state.products.push(r.product);
+    render();
   });
 }
 
@@ -912,46 +1022,6 @@ function openForm(title, fields, submitLabel, onSubmit, afterOpen) {
   };
   dlg.showModal();
   if (afterOpen) afterOpen();
-}
-
-function openActionSheet(title, items) {
-  const dlg = $('#dlg');
-  dlg.innerHTML = `<h2>${esc(title)}</h2>
-    <div class="sheet">${items.map((it, i) => `<button type="button" class="sheet-item${it.danger ? ' danger' : ''}" data-i="${i}">${esc(it.label)}</button>`).join('')}</div>
-    <div class="actions"><button type="button" class="btn" id="cancel">Close</button></div>`;
-  $('#cancel').onclick = () => dlg.close();
-  dlg.querySelectorAll('.sheet-item').forEach(btn => {
-    btn.onclick = () => { dlg.close(); items[+btn.dataset.i].onClick(); };
-  });
-  dlg.showModal();
-}
-
-function openStageSheet(o) {
-  const dlg = $('#dlg');
-  const current = o.Stage || 1;
-  dlg.innerHTML = `<h2>Production stage — ${esc(o.OrderID)}</h2>
-    <div class="sheet">${STAGES.map((label, i) => {
-      const step = i + 1;
-      const active = step === current;
-      return `<button type="button" class="sheet-item stage-pick${active ? ' active' : ''}" data-step="${step}">
-        <span class="stage-num">${step}</span>${esc(label)}${active ? ' <span class="muted" style="font-weight:400">(current)</span>' : ''}
-      </button>`;
-    }).join('')}</div>
-    <div class="actions"><button type="button" class="btn" id="cancel">Close</button></div>`;
-  $('#cancel').onclick = () => dlg.close();
-  dlg.querySelectorAll('.stage-pick').forEach(btn => {
-    btn.onclick = async () => {
-      const step = +btn.dataset.step;
-      dlg.close();
-      if (step === current) return;
-      try {
-        await api(`/orders/${encodeURIComponent(o._id)}/stage`, 'PATCH', { Stage: step });
-        toast(`${o.OrderID} moved to "${STAGES[step - 1]}"`);
-        await loadAll();
-      } catch (e) { toast(e.message); }
-    };
-  });
-  dlg.showModal();
 }
 
 /* ---------- boot ---------- */

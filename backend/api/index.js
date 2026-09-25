@@ -92,6 +92,21 @@ const orders = mongoose.model("Orders", {
     unique: true
   },
 
+  // User-given label for the order, e.g. "Gate hinges - Sharma Steel"
+  OrderName: {
+    type: String,
+    trim: true,
+    default: ""
+  },
+
+  // Which kind of job this is. Drives which extra fields and stage
+  // roadmap apply on the frontend.
+  OrderType: {
+    type: String,
+    enum: ["New Order", "Labour Job", "Repairing", "Trading"],
+    default: "New Order"
+  },
+
   Client: {
     type: mongoose.Schema.Types.ObjectId,
     ref: "Client",
@@ -128,6 +143,30 @@ const orders = mongoose.model("Orders", {
     required: true
   },
 
+  // Repairing only: the quote given before work starts. TotalValue is
+  // used as the actual final billed amount (kept generic so Advance /
+  // RemainingPayment / Status work the same way for every order type).
+  EstimatedCost: {
+    type: Number,
+    default: 0
+  },
+
+  // Trading only: what the item cost to buy in, so margin can be seen
+  // against TotalValue (the selling price billed to the client).
+  PurchaseCost: {
+    type: Number,
+    default: 0
+  },
+
+  // What the job actually is — machine/model for Repairing, material
+  // description for Labour Job, item name for Trading, product for
+  // New Order. Label shown for this changes per OrderType on the frontend.
+  ItemDetails: {
+    type: String,
+    trim: true,
+    default: ""
+  },
+
   RemainingPayment: {
     type: Number,
     required: true
@@ -139,11 +178,12 @@ const orders = mongoose.model("Orders", {
     default: "Active"
   },
 
-  // Production/delivery roadmap step: 1 Buying raw material,
-  // 2 Processing raw material, 3 Completion of order, 4 Delivery of order
+  // Production/delivery roadmap step. Meaning depends on OrderType —
+  // see STAGE_SETS on the frontend and STAGE_COUNTS below. Max step
+  // varies by type (Trading only has 3 steps), enforced in the
+  // /orders/:id/stage route rather than a fixed schema enum.
   Stage: {
     type: Number,
-    enum: [1, 2, 3, 4],
     default: 1
   },
 
@@ -156,18 +196,34 @@ const orders = mongoose.model("Orders", {
   }]
 });
 
+// Number of roadmap steps per order type — keep in sync with STAGE_SETS
+// on the frontend.
+const STAGE_COUNTS = {
+  "New Order": 4,
+  "Labour Job": 4,
+  "Repairing": 4,
+  "Trading": 3
+};
+
 app.post("/neworder", async (req, res) => {
   try {
 
     const {
+      OrderName,
+      OrderType,
       Client,
       ReceivingDate,
       DeliveryDate,
       Advance,
       AdvanceMode,
       AdvanceDate,
-      TotalValue
+      TotalValue,
+      EstimatedCost,
+      PurchaseCost,
+      ItemDetails
     } = req.body;
+
+    const type = STAGE_COUNTS[OrderType] ? OrderType : "New Order";
 
     // Count existing orders
     const yearPrefix = `ORD-${new Date().getFullYear()}-`;
@@ -186,6 +242,8 @@ app.post("/neworder", async (req, res) => {
 
     const newOrder = new orders({
       OrderID,
+      OrderName: (OrderName || "").trim() || OrderID,
+      OrderType: type,
       Client,
       ReceivingDate,
       DeliveryDate,
@@ -193,6 +251,9 @@ app.post("/neworder", async (req, res) => {
       AdvanceMode,
       AdvanceDate,
       TotalValue,
+      EstimatedCost: EstimatedCost || 0,
+      PurchaseCost: PurchaseCost || 0,
+      ItemDetails: (ItemDetails || "").trim(),
       RemainingPayment: TotalValue - Advance,
       AdvanceHistory: Advance > 0 ? [{ amount: Advance, mode: AdvanceMode, date: AdvanceDate }] : []
     });
@@ -235,10 +296,14 @@ app.patch('/orders/:id', async (req, res) => {
       return res.status(404).json({ message: "Order not found" });
     }
 
-    const { ReceivingDate, DeliveryDate, TotalValue } = req.body;
+    const { OrderName, ReceivingDate, DeliveryDate, TotalValue, EstimatedCost, PurchaseCost, ItemDetails } = req.body;
 
+    if (OrderName !== undefined && OrderName.trim()) order.OrderName = OrderName.trim();
     if (ReceivingDate !== undefined) order.ReceivingDate = ReceivingDate;
     if (DeliveryDate !== undefined) order.DeliveryDate = DeliveryDate;
+    if (EstimatedCost !== undefined) order.EstimatedCost = Number(EstimatedCost) || 0;
+    if (PurchaseCost !== undefined) order.PurchaseCost = Number(PurchaseCost) || 0;
+    if (ItemDetails !== undefined) order.ItemDetails = ItemDetails.trim();
 
     if (TotalValue !== undefined) {
       const newTotal = Number(TotalValue);
@@ -329,21 +394,24 @@ app.patch('/orders/:id/status', async (req, res) => {
   }
 });
 
-// UPDATE ORDER STAGE (roadmap: 1 Buying raw material, 2 Processing raw material,
-// 3 Completion of order, 4 Delivery of order)
+// UPDATE ORDER STAGE — the number of valid steps depends on OrderType
+// (see STAGE_COUNTS above / STAGE_SETS on the frontend).
 app.patch('/orders/:id/stage', async (req, res) => {
   try {
-    const step = Number(req.body.Stage);
-
-    if (![1, 2, 3, 4].includes(step)) {
-      return res.status(400).json({ message: "Stage must be 1, 2, 3, or 4" });
-    }
-
-    const order = await orders.findByIdAndUpdate(req.params.id, { Stage: step }, { new: true });
-
+    const order = await orders.findById(req.params.id);
     if (!order) {
       return res.status(404).json({ message: "Order not found" });
     }
+
+    const step = Number(req.body.Stage);
+    const maxStage = STAGE_COUNTS[order.OrderType] || 4;
+
+    if (!Number.isInteger(step) || step < 1 || step > maxStage) {
+      return res.status(400).json({ message: `Stage must be between 1 and ${maxStage} for a ${order.OrderType}` });
+    }
+
+    order.Stage = step;
+    await order.save();
 
     res.status(200).json({ message: "Stage updated", order });
   } catch (error) {
