@@ -193,17 +193,27 @@ const orders = mongoose.model("Orders", {
     amount: Number,
     mode: String,
     date: String
+  }],
+
+  // Full audit trail — created, edited, stage moved, status changed,
+  // advance added. Newest-last; frontend reverses for display.
+  History: [{
+    event: String,
+    detail: String,
+    date: String
   }]
 });
 
-// Number of roadmap steps per order type — keep in sync with STAGE_SETS
+// Stage roadmap labels per order type — also used to write readable
+// history entries when a stage changes. Keep in sync with STAGE_SETS
 // on the frontend.
-const STAGE_COUNTS = {
-  "New Order": 4,
-  "Labour Job": 4,
-  "Repairing": 4,
-  "Trading": 3
+const STAGE_LABELS = {
+  "New Order": ["Buying raw material", "Processing raw material", "Completion of order", "Delivery of order"],
+  "Labour Job": ["Raw material received", "Processing / job work", "Completion of order", "Delivery of order"],
+  "Repairing": ["Machine received", "Diagnosis / repair in progress", "Repair completed", "Delivered to client"],
+  "Trading": ["Item purchased", "Ready for delivery", "Delivered to client"]
 };
+const STAGE_COUNTS = Object.fromEntries(Object.entries(STAGE_LABELS).map(([k, v]) => [k, v.length]));
 
 app.post("/neworder", async (req, res) => {
   try {
@@ -240,6 +250,7 @@ app.post("/neworder", async (req, res) => {
     // Generate human-readable ID
     const OrderID = `${yearPrefix}${String(nextNum).padStart(4, "0")}`;
 
+    const now = new Date().toISOString();
     const newOrder = new orders({
       OrderID,
       OrderName: (OrderName || "").trim() || OrderID,
@@ -255,7 +266,11 @@ app.post("/neworder", async (req, res) => {
       PurchaseCost: PurchaseCost || 0,
       ItemDetails: (ItemDetails || "").trim(),
       RemainingPayment: TotalValue - Advance,
-      AdvanceHistory: Advance > 0 ? [{ amount: Advance, mode: AdvanceMode, date: AdvanceDate }] : []
+      AdvanceHistory: Advance > 0 ? [{ amount: Advance, mode: AdvanceMode, date: AdvanceDate }] : [],
+      History: [
+        { event: "Created", detail: `Order created as ${type}`, date: now },
+        ...(Advance > 0 ? [{ event: "Payment", detail: `Advance of ₹${Advance} recorded (${AdvanceMode})`, date: now }] : [])
+      ]
     });
 
     await newOrder.save();
@@ -297,13 +312,25 @@ app.patch('/orders/:id', async (req, res) => {
     }
 
     const { OrderName, ReceivingDate, DeliveryDate, TotalValue, EstimatedCost, PurchaseCost, ItemDetails } = req.body;
+    const changes = [];
 
-    if (OrderName !== undefined && OrderName.trim()) order.OrderName = OrderName.trim();
-    if (ReceivingDate !== undefined) order.ReceivingDate = ReceivingDate;
-    if (DeliveryDate !== undefined) order.DeliveryDate = DeliveryDate;
+    if (OrderName !== undefined && OrderName.trim() && OrderName.trim() !== order.OrderName) {
+      changes.push(`name → "${OrderName.trim()}"`);
+      order.OrderName = OrderName.trim();
+    }
+    if (ReceivingDate !== undefined && ReceivingDate !== order.ReceivingDate) {
+      changes.push(`receiving date → ${ReceivingDate}`);
+      order.ReceivingDate = ReceivingDate;
+    }
+    if (DeliveryDate !== undefined && DeliveryDate !== order.DeliveryDate) {
+      changes.push(`delivery date → ${DeliveryDate}`);
+      order.DeliveryDate = DeliveryDate;
+    }
     if (EstimatedCost !== undefined) order.EstimatedCost = Number(EstimatedCost) || 0;
     if (PurchaseCost !== undefined) order.PurchaseCost = Number(PurchaseCost) || 0;
-    if (ItemDetails !== undefined) order.ItemDetails = ItemDetails.trim();
+    if (ItemDetails !== undefined && ItemDetails.trim() !== order.ItemDetails) {
+      order.ItemDetails = ItemDetails.trim();
+    }
 
     if (TotalValue !== undefined) {
       const newTotal = Number(TotalValue);
@@ -312,8 +339,13 @@ app.patch('/orders/:id', async (req, res) => {
           message: "Total value cannot be less than the advance already received"
         });
       }
+      if (newTotal !== order.TotalValue) changes.push(`total value → ₹${newTotal}`);
       order.TotalValue = newTotal;
       order.RemainingPayment = newTotal - order.Advance;
+    }
+
+    if (changes.length) {
+      order.History.push({ event: "Edited", detail: `Updated ${changes.join(", ")}`, date: new Date().toISOString() });
     }
 
     await order.save();
@@ -361,6 +393,7 @@ app.post('/orders/:id/advance', async (req, res) => {
     order.Advance += amt;
     order.RemainingPayment -= amt;
     order.AdvanceHistory.push({ amount: amt, mode, date });
+    order.History.push({ event: "Payment", detail: `Advance of ₹${amt} added (${mode})`, date: new Date().toISOString() });
 
     await order.save();
 
@@ -379,14 +412,20 @@ app.patch('/orders/:id/status', async (req, res) => {
       return res.status(400).json({ message: "Status must be Active or Completed" });
     }
 
-    const update = { Status };
-    if (Status === "Completed" && markPaid) update.RemainingPayment = 0;
-
-    const order = await orders.findByIdAndUpdate(req.params.id, update, { new: true });
-
+    const order = await orders.findById(req.params.id);
     if (!order) {
       return res.status(404).json({ message: "Order not found" });
     }
+
+    order.Status = Status;
+    let detail = Status === "Completed" ? "Marked completed" : "Reopened";
+    if (Status === "Completed" && markPaid && order.RemainingPayment > 0) {
+      order.RemainingPayment = 0;
+      detail += " · remaining balance marked as paid";
+    }
+    order.History.push({ event: "Status", detail, date: new Date().toISOString() });
+
+    await order.save();
 
     res.status(200).json({ message: "Order updated", order });
   } catch (error) {
@@ -411,6 +450,8 @@ app.patch('/orders/:id/stage', async (req, res) => {
     }
 
     order.Stage = step;
+    const labels = STAGE_LABELS[order.OrderType] || STAGE_LABELS["New Order"];
+    order.History.push({ event: "Stage", detail: `Moved to step ${step} of ${maxStage}: ${labels[step - 1]}`, date: new Date().toISOString() });
     await order.save();
 
     res.status(200).json({ message: "Stage updated", order });
