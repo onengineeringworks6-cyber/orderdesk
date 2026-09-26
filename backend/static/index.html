@@ -261,6 +261,11 @@
   .timeline .ev .body b { display: block; font-weight: 600; font-size: 14px; }
   .timeline .ev .body div { font-size: 13px; color: var(--ink); margin-top: 1px; }
   .timeline .ev .body small { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .photo-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(90px, 1fr)); gap: 8px; }
+  .photo { position: relative; aspect-ratio: 1; border-radius: 10px; overflow: hidden; background: var(--line); }
+  .photo img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .photo-del { position: absolute; top: 4px; right: 4px; width: 22px; height: 22px; border-radius: 50%; border: 0; background: rgba(0,0,0,.55); color: #fff; font-size: 12px; cursor: pointer; line-height: 1; }
+  .photo-cap { position: absolute; bottom: 0; left: 0; right: 0; background: rgba(0,0,0,.55); color: #fff; font-size: 10px; padding: 3px 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   #toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: var(--black); color: #fff; padding: 11px 18px; border-radius: 10px; font-size: 14px; opacity: 0; pointer-events: none; transition: opacity .2s; border-left: 3px solid var(--green-bright); z-index: 60; }
   #toast.show { opacity: 1; }
   .scrim { display: none; }
@@ -322,6 +327,32 @@
     .btn, #nav button, .link, .seg button, details.row summary { min-height: 40px; }
   }
   @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+
+  /* ---------- invoice / receipt (only shown for printing) ---------- */
+  .print-only { display: none; }
+  .inv { font-family: inherit; color: #111; padding: 24px; max-width: 700px; margin: 0 auto; background: #fff; }
+  .inv-head { display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 2px solid #111; padding-bottom: 12px; margin-bottom: 18px; }
+  .inv-head h1 { margin: 0; font-size: 22px; }
+  .inv-head p { margin: 2px 0 0; font-size: 12px; color: #555; }
+  .inv-meta { text-align: right; }
+  .inv-meta h2 { margin: 0 0 4px; font-size: 16px; }
+  .inv-meta p { margin: 0; font-size: 12px; color: #555; }
+  .inv-parties { display: flex; justify-content: space-between; gap: 24px; margin-bottom: 20px; }
+  .inv-parties b { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: #777; margin-bottom: 4px; }
+  .inv-parties p { margin: 0 0 2px; font-size: 13px; }
+  .inv-table { width: 100%; border-collapse: collapse; margin-bottom: 14px; }
+  .inv-table th, .inv-table td { padding: 8px 6px; font-size: 13px; border-bottom: 1px solid #ddd; text-align: left; }
+  .inv-table .num { text-align: right; }
+  .inv-table .muted { color: #888; }
+  .inv-table tfoot td { border-bottom: none; padding-top: 6px; }
+  .inv-table tfoot tr.strong td { font-weight: 700; font-size: 15px; border-top: 2px solid #111; padding-top: 10px; }
+  .inv-status { font-size: 12px; color: #555; margin: 0 0 4px; }
+  .inv-foot { font-size: 12px; color: #777; margin-top: 24px; text-align: center; }
+  @media print {
+    @page { margin: 16mm; }
+    body > *:not(.print-only) { display: none !important; }
+    .print-only { display: block !important; }
+  }
 </style>
 </head>
 <body>
@@ -377,6 +408,7 @@
 
 <dialog id="dlg"></dialog>
 <div id="toast" role="status" aria-live="polite"></div>
+<div id="invoicePrint" class="print-only"></div>
 
 <script>
 /* ---------- config ---------- */
@@ -395,7 +427,8 @@ const ICONS = {
   menu: '<path d="M4 6h16M4 12h16M4 18h16"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
   wallet: '<path d="M3 7a2 2 0 012-2h13v4"/><path d="M3 7v10a2 2 0 002 2h15a1 1 0 001-1V10a1 1 0 00-1-1H5a2 2 0 01-2-2z"/><circle cx="16.5" cy="14" r="1"/>',
-  trend: '<path d="M3 17l6-6 4 4 8-8"/><path d="M15 7h6v6"/>'
+  trend: '<path d="M3 17l6-6 4 4 8-8"/><path d="M15 7h6v6"/>',
+  download: '<path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M4 19h16"/>'
 };
 const icon = n => `<svg class="i" viewBox="0 0 24 24" aria-hidden="true">${ICONS[n]}</svg>`;
 function paintIcons(root = document) { root.querySelectorAll('[data-icon]').forEach(el => { el.innerHTML = icon(el.dataset.icon); el.style.display = 'grid'; }); }
@@ -425,6 +458,27 @@ function waLink(phone, text) {
   const digits = String(phone || '').replace(/\D/g, '');
   const intl = digits.length === 10 ? '91' + digits : digits;
   return `https://wa.me/${intl}?text=${encodeURIComponent(text)}`;
+}
+function compressImage(file, maxDim = 1000, quality = 0.6) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        let { width, height } = img;
+        if (width > height && width > maxDim) { height = Math.round(height * maxDim / width); width = maxDim; }
+        else if (height > maxDim) { width = Math.round(width * maxDim / height); height = maxDim; }
+        const canvas = document.createElement('canvas');
+        canvas.width = width; canvas.height = height;
+        canvas.getContext('2d').drawImage(img, 0, 0, width, height);
+        resolve(canvas.toDataURL('image/jpeg', quality));
+      };
+      img.onerror = () => reject(new Error('Could not read that image'));
+      img.src = reader.result;
+    };
+    reader.onerror = () => reject(new Error('Could not read that file'));
+    reader.readAsDataURL(file);
+  });
 }
 const sum = (arr, k) => arr.reduce((t, x) => t + (Number(x[k]) || 0), 0);
 let toastTimer;
@@ -690,17 +744,25 @@ function monthChart() {
 }
 
 /* ================= ORDERS ================= */
+function filteredOrders() {
+  const q = state.q.trim().toLowerCase();
+  return state.orders.filter(x =>
+    (state.filter === 'All' || (state.filter === 'Due' ? x.RemainingPayment > 0 : x.Status === state.filter)) &&
+    (!q || x.OrderID.toLowerCase().includes(q) || (x.OrderName || '').toLowerCase().includes(q) || clientName(x.Client).toLowerCase().includes(q)));
+}
 function viewOrders() {
   const o = state.orders;
   $('#view').innerHTML = `
     <div class="head"><div><h1 class="title">Orders</h1><p>${o.length} total, ${o.filter(x => x.Status === 'Active').length} active</p></div>
-      <button class="btn primary" id="add"><span data-icon="plus"></span>New order</button></div>
+      <div style="display:flex;gap:8px"><button class="btn" id="export"><span data-icon="download"></span>Export CSV</button>
+      <button class="btn primary" id="add"><span data-icon="plus"></span>New order</button></div></div>
     <div class="toolbar">
       <input type="search" id="q" placeholder="Search by order name, ID or client" aria-label="Search orders" value="${esc(state.q)}">
       <div class="seg" id="seg">${['All', 'Active', 'Completed', 'Due'].map(f => `<button data-f="${f}" aria-pressed="${state.filter === f}">${f}</button>`).join('')}</div>
     </div>
     <div id="list"></div>`;
   $('#add').onclick = openOrderForm;
+  $('#export').onclick = () => exportOrdersCSV(filteredOrders());
   $('#q').oninput = e => { state.q = e.target.value; ordersTable(); };
   $('#list').onclick = e => {
     const remind = e.target.closest('[data-remind-order]');
@@ -716,10 +778,7 @@ function viewOrders() {
   ordersTable();
 }
 function ordersTable() {
-  const q = state.q.trim().toLowerCase();
-  const rows = state.orders.filter(x =>
-    (state.filter === 'All' || (state.filter === 'Due' ? x.RemainingPayment > 0 : x.Status === state.filter)) &&
-    (!q || x.OrderID.toLowerCase().includes(q) || (x.OrderName || '').toLowerCase().includes(q) || clientName(x.Client).toLowerCase().includes(q)));
+  const rows = filteredOrders();
   if (!rows.length) {
     $('#list').innerHTML = `<div class="wrap"><div class="empty"><p>${state.orders.length ? 'No orders match your search.' : 'No orders yet. Create the first one.'}</p></div></div>`;
     return;
@@ -762,6 +821,92 @@ function remindClient(id) {
   window.open(waLink(c.Phone, msg), '_blank');
 }
 
+function csvEscape(v) {
+  const s = v === null || v === undefined ? '' : String(v);
+  return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+function toCSV(rows, headers) {
+  const lines = [headers.map(h => csvEscape(h.label)).join(',')];
+  rows.forEach(r => lines.push(headers.map(h => csvEscape(h.get(r))).join(',')));
+  return lines.join('\r\n');
+}
+function downloadCSV(content, filename) {
+  const blob = new Blob(['\ufeff' + content], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+function exportOrdersCSV(rows) {
+  if (!rows.length) { toast('No orders to export'); return; }
+  const headers = [
+    { label: 'Order ID', get: o => o.OrderID },
+    { label: 'Order name', get: o => o.OrderName || '' },
+    { label: 'Type', get: o => o.OrderType },
+    { label: 'Client', get: o => clientName(o.Client) },
+    { label: 'Client phone', get: o => (state.clients.find(c => c._id === o.Client) || {}).Phone || '' },
+    { label: 'Item / details', get: o => o.ItemDetails || '' },
+    { label: 'Received', get: o => o.ReceivingDate },
+    { label: 'Delivery', get: o => o.DeliveryDate },
+    { label: 'Total value', get: o => o.TotalValue },
+    { label: 'Advance', get: o => o.Advance },
+    { label: 'Remaining', get: o => o.RemainingPayment },
+    { label: 'Estimated cost', get: o => o.EstimatedCost || '' },
+    { label: 'Purchase cost', get: o => o.PurchaseCost || '' },
+    { label: 'Status', get: o => o.Status },
+    { label: 'Stage', get: o => { const s = STAGE_SETS[o.OrderType] || STAGE_SETS['New Order']; return `${o.Stage || 1} of ${s.length} — ${s[(o.Stage || 1) - 1]}`; } }
+  ];
+  downloadCSV(toCSV(rows, headers), `orders-${today()}.csv`);
+  toast(`Exported ${rows.length} order${rows.length === 1 ? '' : 's'}`);
+}
+function exportClientsCSV(rows) {
+  if (!rows.length) { toast('No clients to export'); return; }
+  const headers = [
+    { label: 'Name', get: c => c.name },
+    { label: 'Phone', get: c => c.Phone },
+    { label: 'Address', get: c => c.Add },
+    { label: 'Total orders', get: c => clientStats(c._id).TotalOrders },
+    { label: 'Active orders', get: c => clientStats(c._id).ActiveOrders },
+    { label: 'Balance due', get: c => clientStats(c._id).BalanceDue }
+  ];
+  downloadCSV(toCSV(rows, headers), `clients-${today()}.csv`);
+  toast(`Exported ${rows.length} client${rows.length === 1 ? '' : 's'}`);
+}
+
+function printInvoice(o) {
+  const c = state.clients.find(x => x._id === o.Client) || {};
+  const isInvoice = o.RemainingPayment > 0;
+  const html = `
+    <div class="inv">
+      <div class="inv-head">
+        <div><h1>Primova</h1><p>Prime Solutions. Real Results.</p></div>
+        <div class="inv-meta"><h2>${isInvoice ? 'Invoice' : 'Receipt'}</h2>
+          <p>${esc(o.OrderID)}</p><p>${fmtDate(o.ReceivingDate)}</p></div>
+      </div>
+      <div class="inv-parties">
+        <div><b>Billed to</b><p>${esc(c.name || 'Unknown client')}</p>${c.Add ? `<p>${esc(c.Add)}</p>` : ''}${c.Phone ? `<p>${esc(c.Phone)}</p>` : ''}</div>
+        <div><b>Order</b><p>${esc(orderTitle(o))}</p><p>${esc(o.OrderType)}</p></div>
+      </div>
+      <table class="inv-table">
+        <thead><tr><th>Description</th><th class="num">Amount</th></tr></thead>
+        <tbody>
+          <tr><td>${esc(itemLabel(o.OrderType))}${o.ItemDetails ? ': ' + esc(o.ItemDetails) : ''}</td><td class="num">${money(o.TotalValue)}</td></tr>
+          ${o.OrderType === 'Repairing' && o.EstimatedCost > 0 ? `<tr><td class="muted">Estimated cost (quoted before work)</td><td class="num muted">${money(o.EstimatedCost)}</td></tr>` : ''}
+        </tbody>
+        <tfoot>
+          <tr><td>Total</td><td class="num">${money(o.TotalValue)}</td></tr>
+          <tr><td>Advance / paid</td><td class="num">${money(o.Advance)}</td></tr>
+          <tr class="strong"><td>${isInvoice ? 'Balance due' : 'Balance'}</td><td class="num">${money(o.RemainingPayment)}</td></tr>
+        </tfoot>
+      </table>
+      <p class="inv-status">Status: ${esc(o.Status)}${o.DeliveryDate ? ` · Delivery: ${fmtDate(o.DeliveryDate)}` : ''}</p>
+      <p class="inv-foot">Thank you for your business — Primova</p>
+    </div>`;
+  $('#invoicePrint').innerHTML = html;
+  setTimeout(() => window.print(), 50);
+}
+
 function openOrderHistory(o) {
   const dlg = $('#dlg');
   const hist = (o.History || []).slice().reverse();
@@ -771,6 +916,51 @@ function openOrderHistory(o) {
       : '<p class="muted">No history recorded yet.</p>'}
     <div class="actions"><button type="button" class="btn" id="cancel">Close</button></div>`;
   $('#cancel').onclick = () => dlg.close();
+  dlg.showModal();
+}
+
+function openOrderPhotos(o) {
+  const dlg = $('#dlg');
+  const render = () => {
+    const photos = o.Photos || [];
+    dlg.innerHTML = `<h2>Photos — ${esc(orderTitle(o))}</h2>
+      ${photos.length ? `<div class="photo-grid">${photos.map(p => `
+        <div class="photo"><img src="${p.url}" alt="${esc(p.caption || 'Order photo')}">
+          <button type="button" class="photo-del" data-pid="${esc(p._id)}" title="Remove">✕</button>
+          ${p.caption ? `<span class="photo-cap">${esc(p.caption)}</span>` : ''}</div>`).join('')}</div>`
+        : '<p class="muted" style="margin-top:0">No photos yet.</p>'}
+      <label class="btn primary" style="display:inline-flex;margin-top:14px;cursor:pointer">
+        <span data-icon="plus"></span>Add photo
+        <input type="file" accept="image/*" capture="environment" id="photoInput" style="display:none">
+      </label>
+      <div class="actions"><button type="button" class="btn" id="cancel">Close</button></div>`;
+    $('#cancel').onclick = () => dlg.close();
+    $('#photoInput').onchange = async e => {
+      const file = e.target.files[0];
+      if (!file) return;
+      try {
+        toast('Adding photo…');
+        const url = await compressImage(file);
+        const r = await api(`/orders/${encodeURIComponent(o._id)}/photos`, 'POST', { url });
+        o = r.order;
+        patchOrder(r.order);
+        toast('Photo added');
+        render();
+      } catch (err) { toast(err.message || 'Could not add photo'); }
+    };
+    dlg.querySelectorAll('.photo-del').forEach(btn => {
+      btn.onclick = async () => {
+        if (!confirm('Remove this photo?')) return;
+        try {
+          const r = await api(`/orders/${encodeURIComponent(o._id)}/photos/${btn.dataset.pid}`, 'DELETE');
+          o = r.order;
+          patchOrder(r.order);
+          render();
+        } catch (err) { toast(err.message); }
+      };
+    });
+  };
+  render();
   dlg.showModal();
 }
 
@@ -789,6 +979,8 @@ function openOrderActions(id) {
     </div>
     <div class="sheet" style="margin-top:4px">
       <button type="button" class="sheet-item" id="editBtn">Edit order details</button>
+      <button type="button" class="sheet-item" id="photosBtn">Photos${o.Photos && o.Photos.length ? ` (${o.Photos.length})` : ''}</button>
+      <button type="button" class="sheet-item" id="invBtn">${o.RemainingPayment > 0 ? 'Invoice' : 'Receipt'} (print / save PDF)</button>
       ${o.RemainingPayment > 0 ? `<button type="button" class="sheet-item" id="advBtn">Add advance payment</button>` : ''}
       ${o.RemainingPayment > 0 ? `<button type="button" class="sheet-item" id="remindBtn">Send payment reminder (WhatsApp)</button>` : ''}
       <button type="button" class="sheet-item" id="histBtn">View order history</button>
@@ -797,6 +989,8 @@ function openOrderActions(id) {
     <div class="actions"><button type="button" class="btn" id="cancel">Close</button></div>`;
   $('#cancel').onclick = () => dlg.close();
   $('#editBtn').onclick = () => { dlg.close(); editOrderForm(o); };
+  $('#photosBtn').onclick = () => { dlg.close(); openOrderPhotos(o); };
+  $('#invBtn').onclick = () => { dlg.close(); printInvoice(o); };
   const advBtn = $('#advBtn'); if (advBtn) advBtn.onclick = () => { dlg.close(); addAdvanceForm(o); };
   const remindBtn = $('#remindBtn'); if (remindBtn) remindBtn.onclick = () => { dlg.close(); remindOrder(o); };
   $('#histBtn').onclick = () => { dlg.close(); openOrderHistory(o); };
@@ -937,26 +1131,33 @@ function openOrderForm() {
 }
 
 /* ================= CLIENTS ================= */
+function filteredClients() {
+  const q = state.q.trim().toLowerCase();
+  return state.clients.filter(c => !q || c.name.toLowerCase().includes(q) || c.Phone.includes(q));
+}
 function viewClients() {
   const totalDue = sum(state.orders, 'RemainingPayment');
   $('#view').innerHTML = `
     <div class="head"><div><h1 class="title">Clients</h1><p>${state.clients.length} clients, ${money(totalDue)} outstanding</p></div>
-      <button class="btn primary" id="add"><span data-icon="plus"></span>New client</button></div>
+      <div style="display:flex;gap:8px"><button class="btn" id="export"><span data-icon="download"></span>Export CSV</button>
+      <button class="btn primary" id="add"><span data-icon="plus"></span>New client</button></div></div>
     <div class="toolbar"><input type="search" id="q" placeholder="Search by name or phone" aria-label="Search clients" value="${esc(state.q)}"></div>
     <div id="list"></div>`;
   $('#add').onclick = openClientForm;
+  $('#export').onclick = () => exportClientsCSV(filteredClients());
   $('#q').oninput = e => { state.q = e.target.value; clientsList(); };
   $('#list').onclick = e => {
+    const remindC = e.target.closest('[data-remind-client]');
     const edit = e.target.closest('[data-edit-client]');
     const del = e.target.closest('[data-delete-client]');
-    if (edit) { e.preventDefault(); editClientForm(edit.dataset.editClient); }
+    if (remindC) { /* handled by the global data-remind-client listener */ }
+    else if (edit) { e.preventDefault(); editClientForm(edit.dataset.editClient); }
     else if (del) { e.preventDefault(); deleteClient(del.dataset.deleteClient); }
   };
   clientsList();
 }
 function clientsList() {
-  const q = state.q.trim().toLowerCase();
-  const rows = state.clients.filter(c => !q || c.name.toLowerCase().includes(q) || c.Phone.includes(q));
+  const rows = filteredClients();
   if (!rows.length) {
     $('#list').innerHTML = `<div class="wrap"><div class="empty"><p>${state.clients.length ? 'No clients match your search.' : 'No clients yet. Add your first client.'}</p></div></div>`;
     return;
