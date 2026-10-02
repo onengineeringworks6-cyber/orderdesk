@@ -2,12 +2,14 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const path = require('path');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
 // =====================================================
 
 // ================ BASIC APP ==========================
 const app = express();
 const port = 3000;
-app.use(express.json());
+app.use(express.json({ limit: '5mb' })); // raised from the default 100kb so compressed order photos can upload
 app.use(express.static(path.join(__dirname, '..', 'static')));
 // =====================================================
 
@@ -26,16 +28,96 @@ const admin = mongoose.model("Admin", {
   password: {
     type: String,
     required: true
+  },
+  // "admin" sees and manages everything. "worker" can view orders and
+  // update Status/Stage/Photos, but never sees money figures and can't
+  // create, edit, or delete anything.
+  role: {
+    type: String,
+    enum: ["admin", "worker"],
+    default: "admin"
+  },
+  // Account lockout after repeated failed logins. Stored in the database
+  // (not in server memory) so it still works correctly on Vercel, where
+  // each request can hit a different, freshly-started instance.
+  failedAttempts: {
+    type: Number,
+    default: 0
+  },
+  lockUntil: {
+    type: Date,
+    default: null
   }
 });
 
-// USER SIGNUP
+// Secret used to sign login sessions. Same tradeoff as the Mongo URI below —
+// this fallback keeps the app working out of the box, but for real use you
+// should set JWT_SECRET in your Vercel environment variables to a long
+// random string, so sessions can't be forged by anyone who reads this code.
+const JWT_SECRET = process.env.JWT_SECRET || "orderdesk-dev-secret-change-me";
+
+// Require a valid login token on every route this runs before.
+async function requireAuth(req, res, next) {
+  const header = req.headers.authorization || "";
+  const token = header.startsWith("Bearer ") ? header.slice(7) : null;
+  if (!token) {
+    return res.status(401).json({ message: "Please log in" });
+  }
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    // Look the user up every time, so removing or demoting someone takes
+    // effect immediately instead of when their 30-day token runs out.
+    const user = await admin.findById(decoded.id, "username role");
+    if (!user) {
+      return res.status(401).json({ message: "This account no longer exists" });
+    }
+    req.user = { id: String(user._id), username: user.username, role: user.role || "admin" };
+    next();
+  } catch (error) {
+    return res.status(401).json({ message: "Your session has expired — please log in again" });
+  }
+}
+
+// Require the logged-in user to be an admin (not a worker). Always used
+// after requireAuth, so req.user is already set.
+function requireAdmin(req, res, next) {
+  if (!req.user || req.user.role !== "admin") {
+    return res.status(403).json({ message: "Only an admin can do this" });
+  }
+  next();
+}
+
+// Shape an order for the caller: admins get everything, workers get no money.
+function forRole(req, orderDoc) {
+  return req.user.role === "admin" ? orderDoc : stripFinancials(orderDoc);
+}
+
+// Removes money-related fields from an order before it's sent to a
+// non-admin user.
+function stripFinancials(orderDoc) {
+  const o = orderDoc.toObject ? orderDoc.toObject() : orderDoc;
+  const { TotalValue, Advance, RemainingPayment, EstimatedCost, PurchaseCost, AdvanceHistory, History, Expenses, ...safe } = o;
+  return safe;
+}
+
+// USER SIGNUP — bootstrap-only: works once, to create your first (and only)
+// admin account, then locks itself automatically once any admin exists.
+// This closes the previously-open public signup endpoint without needing
+// any separate secret or manual step.
 app.post('/signup', async (req, res) => {
   try {
-    const newAdmin = new admin({
-      username: req.body.username,
-      password: req.body.password
-    });
+    const existingCount = await admin.countDocuments();
+    if (existingCount > 0) {
+      return res.status(403).json({ message: "Signup is closed — an admin account already exists." });
+    }
+
+    const { username, password } = req.body;
+    if (!username || !password || password.length < 6) {
+      return res.status(400).json({ message: "Username and a password of at least 6 characters are required" });
+    }
+
+    const hashed = await bcrypt.hash(password, 10);
+    const newAdmin = new admin({ username, password: hashed });
 
     await newAdmin.save();
 
@@ -64,14 +146,57 @@ app.post('/login', async (req, res) => {
       });
     }
 
-    if (existingAdmin.password !== password) {
+    if (existingAdmin.lockUntil && existingAdmin.lockUntil > new Date()) {
+      const mins = Math.ceil((existingAdmin.lockUntil - new Date()) / 60000);
+      return res.status(429).json({
+        message: `Too many failed attempts. Try again in ${mins} minute${mins === 1 ? "" : "s"}.`
+      });
+    }
+
+    // Existing accounts may still have a plain-text password from before
+    // hashing was added. Verify either way, and silently upgrade a
+    // plain-text match to a proper hash so it migrates itself on next
+    // login — no manual reset needed, no risk of being locked out.
+    const looksHashed = /^\$2[aby]\$/.test(existingAdmin.password);
+    let ok;
+    if (looksHashed) {
+      ok = await bcrypt.compare(password, existingAdmin.password);
+    } else {
+      ok = existingAdmin.password === password;
+      if (ok) {
+        existingAdmin.password = await bcrypt.hash(password, 10);
+      }
+    }
+
+    if (!ok) {
+      existingAdmin.failedAttempts = (existingAdmin.failedAttempts || 0) + 1;
+      if (existingAdmin.failedAttempts >= 8) {
+        existingAdmin.lockUntil = new Date(Date.now() + 15 * 60 * 1000);
+        existingAdmin.failedAttempts = 0;
+      }
+      await existingAdmin.save();
       return res.status(401).json({
         message: "Invalid username or password"
       });
     }
 
+    existingAdmin.failedAttempts = 0;
+    existingAdmin.lockUntil = null;
+    await existingAdmin.save();
+
+    const role = existingAdmin.role || "admin";
+    const token = jwt.sign(
+      { id: existingAdmin._id.toString(), username: existingAdmin.username, role },
+      JWT_SECRET,
+      { expiresIn: "30d" }
+    );
+
     res.status(200).json({
-      message: "Login successful"
+      message: "Login successful",
+      token,
+      id: existingAdmin._id.toString(),
+      username: existingAdmin.username,
+      role
     });
 
   } catch (error) {
@@ -81,6 +206,10 @@ app.post('/login', async (req, res) => {
     });
   }
 });
+
+// Everything below this point requires a valid login token.
+// /signup and /login (above) are the only routes that stay public.
+app.use(requireAuth);
 
 
 // ...............................ORDERS...............................
@@ -167,6 +296,25 @@ const orders = mongoose.model("Orders", {
     default: ""
   },
 
+  // Optional link to a catalog product — lets an order be filled in from
+  // the Products list instead of typing ItemDetails freehand every time.
+  Product: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "Product",
+    default: null
+  },
+
+  // Which team member is responsible for this job. The name is stored too,
+  // so it can be shown to workers (who can't load the team list).
+  AssignedTo: {
+    type: String,
+    default: ""
+  },
+  AssignedName: {
+    type: String,
+    default: ""
+  },
+
   RemainingPayment: {
     type: Number,
     required: true
@@ -201,7 +349,36 @@ const orders = mongoose.model("Orders", {
     event: String,
     detail: String,
     date: String
-  }]
+  }],
+
+  // Reference photos — e.g. machine on arrival for Repairing, material
+  // received for Labour Job. Stored as compressed base64 data URLs
+  // (compression happens client-side before upload).
+  Photos: [{
+    url: String,
+    caption: String,
+    date: String
+  }],
+
+  // Costs against this order beyond PurchaseCost (raw material, labour,
+  // freight, etc.), so profit can be seen per order. Admin-only, same as
+  // every other money field.
+  Expenses: [{
+    label: String,
+    amount: Number,
+    date: String
+  }],
+
+  // Soft delete — "deleted" orders are hidden from normal views but kept
+  // in the database so they can be restored from Recently Deleted.
+  Deleted: {
+    type: Boolean,
+    default: false
+  },
+  DeletedAt: {
+    type: String,
+    default: null
+  }
 });
 
 // Stage roadmap labels per order type — also used to write readable
@@ -215,13 +392,14 @@ const STAGE_LABELS = {
 };
 const STAGE_COUNTS = Object.fromEntries(Object.entries(STAGE_LABELS).map(([k, v]) => [k, v.length]));
 
-app.post("/neworder", async (req, res) => {
+app.post("/neworder", requireAdmin, async (req, res) => {
   try {
 
     const {
       OrderName,
       OrderType,
       Client,
+      Product,
       ReceivingDate,
       DeliveryDate,
       Advance,
@@ -230,8 +408,25 @@ app.post("/neworder", async (req, res) => {
       TotalValue,
       EstimatedCost,
       PurchaseCost,
-      ItemDetails
+      ItemDetails,
+      AssignedTo
     } = req.body;
+
+    // Optional: assign the job to a team member right away.
+    let assignedId = "", assignedName = "";
+    if (AssignedTo && mongoose.isValidObjectId(AssignedTo)) {
+      const member = await admin.findById(AssignedTo, "username");
+      if (member) { assignedId = String(member._id); assignedName = member.username; }
+    }
+
+    // Don't trust the form alone — validate the money on the server too.
+    const totalNum = Number(TotalValue), advNum = Number(Advance);
+    if (!Number.isFinite(totalNum) || !Number.isFinite(advNum) || totalNum < 0 || advNum < 0) {
+      return res.status(400).json({ message: "Total value and advance must be valid, non-negative numbers" });
+    }
+    if (advNum > totalNum) {
+      return res.status(400).json({ message: "Advance cannot be more than the total value" });
+    }
 
     const type = STAGE_COUNTS[OrderType] ? OrderType : "New Order";
 
@@ -256,6 +451,9 @@ app.post("/neworder", async (req, res) => {
       OrderName: (OrderName || "").trim() || OrderID,
       OrderType: type,
       Client,
+      Product: Product && Product.trim() ? Product : null,
+      AssignedTo: assignedId,
+      AssignedName: assignedName,
       ReceivingDate,
       DeliveryDate,
       Advance,
@@ -265,10 +463,11 @@ app.post("/neworder", async (req, res) => {
       EstimatedCost: EstimatedCost || 0,
       PurchaseCost: PurchaseCost || 0,
       ItemDetails: (ItemDetails || "").trim(),
-      RemainingPayment: TotalValue - Advance,
+      RemainingPayment: totalNum - advNum,
       AdvanceHistory: Advance > 0 ? [{ amount: Advance, mode: AdvanceMode, date: AdvanceDate }] : [],
       History: [
         { event: "Created", detail: `Order created as ${type}`, date: now },
+        ...(assignedName ? [{ event: "Assigned", detail: `Assigned to ${assignedName}`, date: now }] : []),
         ...(Advance > 0 ? [{ event: "Payment", detail: `Advance of ₹${Advance} recorded (${AdvanceMode})`, date: now }] : [])
       ]
     });
@@ -288,12 +487,14 @@ app.post("/neworder", async (req, res) => {
   }
 });
 
-// GETTING ALL THE ORDERS
+// GETTING ALL THE ORDERS (excludes soft-deleted)
 app.get('/orders', async (req, res) => {
   try {
-    const allorders = await orders.find({});
+    const allorders = await orders.find({ Deleted: { $ne: true } });
 
-    res.status(200).json(allorders);
+    res.status(200).json(
+      req.user.role === "admin" ? allorders : allorders.map(stripFinancials)
+    );
 
   } catch (error) {
     res.status(500).json({
@@ -303,17 +504,30 @@ app.get('/orders', async (req, res) => {
   }
 });
 
+// GETTING SOFT-DELETED ORDERS (Recently Deleted)
+app.get('/orders/deleted', requireAdmin, async (req, res) => {
+  try {
+    const deleted = await orders.find({ Deleted: true }).sort({ DeletedAt: -1 });
+    res.status(200).json(deleted);
+  } catch (error) {
+    res.status(500).json({ message: "Error fetching deleted orders", error: error.message });
+  }
+});
+
 // EDIT AN ORDER
-app.patch('/orders/:id', async (req, res) => {
+app.patch('/orders/:id', requireAdmin, async (req, res) => {
   try {
     const order = await orders.findById(req.params.id);
     if (!order) {
       return res.status(404).json({ message: "Order not found" });
     }
 
-    const { OrderName, ReceivingDate, DeliveryDate, TotalValue, EstimatedCost, PurchaseCost, ItemDetails } = req.body;
+    const { OrderName, ReceivingDate, DeliveryDate, TotalValue, EstimatedCost, PurchaseCost, ItemDetails, Product } = req.body;
     const changes = [];
 
+    if (Product !== undefined) {
+      order.Product = Product && Product.trim() ? Product : null;
+    }
     if (OrderName !== undefined && OrderName.trim() && OrderName.trim() !== order.OrderName) {
       changes.push(`name → "${OrderName.trim()}"`);
       order.OrderName = OrderName.trim();
@@ -357,20 +571,55 @@ app.patch('/orders/:id', async (req, res) => {
 });
 
 // DELETE AN ORDER
-app.delete('/orders/:id', async (req, res) => {
+// SOFT-DELETE AN ORDER (moved to Recently Deleted, not actually removed)
+app.delete('/orders/:id', requireAdmin, async (req, res) => {
   try {
-    const order = await orders.findByIdAndDelete(req.params.id);
+    const order = await orders.findById(req.params.id);
     if (!order) {
       return res.status(404).json({ message: "Order not found" });
     }
+    order.Deleted = true;
+    order.DeletedAt = new Date().toISOString();
+    order.History.push({ event: "Deleted", detail: "Order moved to Recently Deleted", date: order.DeletedAt });
+    await order.save();
     res.status(200).json({ message: "Order deleted" });
   } catch (error) {
     res.status(500).json({ message: "Error deleting order", error: error.message });
   }
 });
 
+// RESTORE A SOFT-DELETED ORDER
+app.post('/orders/:id/restore', requireAdmin, async (req, res) => {
+  try {
+    const order = await orders.findById(req.params.id);
+    if (!order) {
+      return res.status(404).json({ message: "Order not found" });
+    }
+    order.Deleted = false;
+    order.DeletedAt = null;
+    order.History.push({ event: "Restored", detail: "Order restored from Recently Deleted", date: new Date().toISOString() });
+    await order.save();
+    res.status(200).json({ message: "Order restored", order });
+  } catch (error) {
+    res.status(500).json({ message: "Error restoring order", error: error.message });
+  }
+});
+
+// PERMANENTLY DELETE AN ORDER (only meant to be called from Recently Deleted)
+app.delete('/orders/:id/forever', requireAdmin, async (req, res) => {
+  try {
+    const order = await orders.findByIdAndDelete(req.params.id);
+    if (!order) {
+      return res.status(404).json({ message: "Order not found" });
+    }
+    res.status(200).json({ message: "Order permanently deleted" });
+  } catch (error) {
+    res.status(500).json({ message: "Error deleting order", error: error.message });
+  }
+});
+
 // ADD AN ADVANCE PAYMENT TO AN EXISTING ORDER
-app.post('/orders/:id/advance', async (req, res) => {
+app.post('/orders/:id/advance', requireAdmin, async (req, res) => {
   try {
     const { amount, mode, date } = req.body;
     const amt = Number(amount);
@@ -419,17 +668,100 @@ app.patch('/orders/:id/status', async (req, res) => {
 
     order.Status = Status;
     let detail = Status === "Completed" ? "Marked completed" : "Reopened";
-    if (Status === "Completed" && markPaid && order.RemainingPayment > 0) {
+    if (Status === "Completed" && markPaid && req.user.role === "admin" && order.RemainingPayment > 0) {
+      // Record it as an actual payment so Advance + Remaining still equals
+      // the total (otherwise a later edit would bring the balance back).
+      const paid = order.RemainingPayment;
+      const nowDate = new Date().toISOString();
+      order.Advance += paid;
       order.RemainingPayment = 0;
-      detail += " · remaining balance marked as paid";
+      order.AdvanceHistory.push({ amount: paid, mode: "Marked as paid", date: nowDate.slice(0, 10) });
+      detail += ` · remaining ₹${paid} marked as paid`;
     }
     order.History.push({ event: "Status", detail, date: new Date().toISOString() });
 
     await order.save();
 
-    res.status(200).json({ message: "Order updated", order });
+    res.status(200).json({ message: "Order updated", order: forRole(req, order) });
   } catch (error) {
     res.status(500).json({ message: "Error updating order", error: error.message });
+  }
+});
+
+// ASSIGN AN ORDER TO A TEAM MEMBER (admin only). Empty AssignedTo = unassign.
+app.patch('/orders/:id/assign', requireAdmin, async (req, res) => {
+  try {
+    const { AssignedTo } = req.body;
+    const order = await orders.findById(req.params.id);
+    if (!order) {
+      return res.status(404).json({ message: "Order not found" });
+    }
+
+    let id = "", name = "";
+    if (AssignedTo) {
+      const member = mongoose.isValidObjectId(AssignedTo) ? await admin.findById(AssignedTo, "username") : null;
+      if (!member) {
+        return res.status(400).json({ message: "That team member no longer exists" });
+      }
+      id = String(member._id);
+      name = member.username;
+    }
+
+    order.AssignedTo = id;
+    order.AssignedName = name;
+    order.History.push({ event: "Assigned", detail: name ? `Assigned to ${name}` : "Unassigned", date: new Date().toISOString() });
+    await order.save();
+
+    res.status(200).json({ message: "Assignment updated", order });
+  } catch (error) {
+    res.status(500).json({ message: "Error updating assignment", error: error.message });
+  }
+});
+
+// ADD AN EXPENSE AGAINST AN ORDER (raw material, labour, freight, etc.)
+app.post('/orders/:id/expenses', requireAdmin, async (req, res) => {
+  try {
+    const { label, amount } = req.body;
+    const amt = Number(amount);
+
+    if (!label || !label.trim() || !Number.isFinite(amt) || amt <= 0) {
+      return res.status(400).json({ message: "A label and a positive amount are required" });
+    }
+
+    const order = await orders.findById(req.params.id);
+    if (!order) {
+      return res.status(404).json({ message: "Order not found" });
+    }
+
+    const now = new Date().toISOString();
+    order.Expenses.push({ label: label.trim(), amount: amt, date: now });
+    order.History.push({ event: "Expense", detail: `${label.trim()}: ₹${amt}`, date: now });
+    await order.save();
+
+    res.status(201).json({ message: "Expense added", order });
+  } catch (error) {
+    res.status(500).json({ message: "Error adding expense", error: error.message });
+  }
+});
+
+// REMOVE AN EXPENSE FROM AN ORDER
+app.delete('/orders/:id/expenses/:expenseId', requireAdmin, async (req, res) => {
+  try {
+    const order = await orders.findById(req.params.id);
+    if (!order) {
+      return res.status(404).json({ message: "Order not found" });
+    }
+    const before = order.Expenses.length;
+    order.Expenses = order.Expenses.filter(e => String(e._id) !== req.params.expenseId);
+    if (order.Expenses.length === before) {
+      return res.status(404).json({ message: "Expense not found" });
+    }
+    order.History.push({ event: "Expense", detail: "Expense removed", date: new Date().toISOString() });
+    await order.save();
+
+    res.status(200).json({ message: "Expense removed", order });
+  } catch (error) {
+    res.status(500).json({ message: "Error removing expense", error: error.message });
   }
 });
 
@@ -454,9 +786,59 @@ app.patch('/orders/:id/stage', async (req, res) => {
     order.History.push({ event: "Stage", detail: `Moved to step ${step} of ${maxStage}: ${labels[step - 1]}`, date: new Date().toISOString() });
     await order.save();
 
-    res.status(200).json({ message: "Stage updated", order });
+    res.status(200).json({ message: "Stage updated", order: forRole(req, order) });
   } catch (error) {
     res.status(500).json({ message: "Error updating stage", error: error.message });
+  }
+});
+
+// ADD A PHOTO TO AN ORDER (compressed client-side before upload)
+app.post('/orders/:id/photos', async (req, res) => {
+  try {
+    const { url, caption } = req.body;
+
+    if (!url || typeof url !== "string" || !/^data:image\/(jpeg|png|webp|gif);base64,[A-Za-z0-9+\/=]+$/.test(url)) {
+      return res.status(400).json({ message: "A valid image is required" });
+    }
+    if (url.length > 1_800_000) {
+      return res.status(400).json({ message: "Photo is too large — please retake it and try again" });
+    }
+
+    const order = await orders.findById(req.params.id);
+    if (!order) {
+      return res.status(404).json({ message: "Order not found" });
+    }
+
+    const now = new Date().toISOString();
+    order.Photos.push({ url, caption: (caption || "").trim(), date: now });
+    order.History.push({ event: "Photo", detail: caption ? `Photo added: ${caption}` : "Photo added", date: now });
+    await order.save();
+
+    res.status(201).json({ message: "Photo added", order: forRole(req, order) });
+  } catch (error) {
+    res.status(500).json({ message: "Error adding photo", error: error.message });
+  }
+});
+
+// DELETE A PHOTO FROM AN ORDER
+app.delete('/orders/:id/photos/:photoId', requireAdmin, async (req, res) => {
+  try {
+    const order = await orders.findById(req.params.id);
+    if (!order) {
+      return res.status(404).json({ message: "Order not found" });
+    }
+
+    const before = order.Photos.length;
+    order.Photos = order.Photos.filter(p => String(p._id) !== req.params.photoId);
+    if (order.Photos.length === before) {
+      return res.status(404).json({ message: "Photo not found" });
+    }
+    order.History.push({ event: "Photo", detail: "Photo removed", date: new Date().toISOString() });
+    await order.save();
+
+    res.status(200).json({ message: "Photo removed", order });
+  } catch (error) {
+    res.status(500).json({ message: "Error removing photo", error: error.message });
   }
 });
 
@@ -479,11 +861,21 @@ const client = mongoose.model("Client", {
     type: String,
     required: true,
     trim: true
+  },
+
+  // Soft delete — same pattern as Orders.
+  Deleted: {
+    type: Boolean,
+    default: false
+  },
+  DeletedAt: {
+    type: String,
+    default: null
   }
 });
 
 // ADDING NEW CLIENT
-app.post("/newclient", async (req, res) => {
+app.post("/newclient", requireAdmin, async (req, res) => {
   try {
 
     const { name, Add, Phone } = req.body;
@@ -535,7 +927,7 @@ app.post("/newclient", async (req, res) => {
 });
 
 // EDIT A CLIENT
-app.patch("/clients/:id", async (req, res) => {
+app.patch("/clients/:id", requireAdmin, async (req, res) => {
   try {
     const { name, Add, Phone } = req.body;
 
@@ -568,19 +960,23 @@ app.patch("/clients/:id", async (req, res) => {
 });
 
 // DELETE A CLIENT
-app.delete("/clients/:id", async (req, res) => {
+// SOFT-DELETE A CLIENT (moved to Recently Deleted, not actually removed)
+app.delete("/clients/:id", requireAdmin, async (req, res) => {
   try {
-    const existingOrders = await orders.countDocuments({ Client: req.params.id });
+    const existingOrders = await orders.countDocuments({ Client: req.params.id, Deleted: { $ne: true } });
     if (existingOrders > 0) {
       return res.status(409).json({
         message: "This client still has orders on record. Delete those orders first."
       });
     }
 
-    const deleted = await client.findByIdAndDelete(req.params.id);
-    if (!deleted) {
+    const c = await client.findById(req.params.id);
+    if (!c) {
       return res.status(404).json({ message: "Client not found" });
     }
+    c.Deleted = true;
+    c.DeletedAt = new Date().toISOString();
+    await c.save();
 
     res.status(200).json({ message: "Client deleted" });
   } catch (error) {
@@ -588,18 +984,64 @@ app.delete("/clients/:id", async (req, res) => {
   }
 });
 
-// GET ALL CLIENTS
+// RESTORE A SOFT-DELETED CLIENT
+app.post("/clients/:id/restore", requireAdmin, async (req, res) => {
+  try {
+    const c = await client.findById(req.params.id);
+    if (!c) {
+      return res.status(404).json({ message: "Client not found" });
+    }
+    c.Deleted = false;
+    c.DeletedAt = null;
+    await c.save();
+    res.status(200).json({ message: "Client restored", client: c });
+  } catch (error) {
+    res.status(500).json({ message: "Error restoring client", error: error.message });
+  }
+});
+
+// PERMANENTLY DELETE A CLIENT (only meant to be called from Recently Deleted)
+app.delete("/clients/:id/forever", requireAdmin, async (req, res) => {
+  try {
+    const existingOrders = await orders.countDocuments({ Client: req.params.id });
+    if (existingOrders > 0) {
+      return res.status(409).json({
+        message: "This client still has orders on record (including deleted ones). Permanently delete those orders first."
+      });
+    }
+    const deleted = await client.findByIdAndDelete(req.params.id);
+    if (!deleted) {
+      return res.status(404).json({ message: "Client not found" });
+    }
+    res.status(200).json({ message: "Client permanently deleted" });
+  } catch (error) {
+    res.status(500).json({ message: "Error deleting client", error: error.message });
+  }
+});
+
+// GET SOFT-DELETED CLIENTS (Recently Deleted)
+app.get("/clients/deleted", requireAdmin, async (req, res) => {
+  try {
+    const deleted = await client.find({ Deleted: true }).sort({ DeletedAt: -1 });
+    res.status(200).json(deleted);
+  } catch (error) {
+    res.status(500).json({ message: "Error fetching deleted clients", error: error.message });
+  }
+});
+
+// GET ALL CLIENTS (excludes soft-deleted)
 app.get("/allclients", async (req, res) => {
   try {
 
-    const allclients = await client.find({});
+    const allclients = await client.find({ Deleted: { $ne: true } });
 
     const clients = await Promise.all(
 
       allclients.map(async (clientData) => {
 
         const clientOrders = await orders.find({
-          Client: clientData._id
+          Client: clientData._id,
+          Deleted: { $ne: true }
         });
 
         const activeOrders = clientOrders.filter(
@@ -610,6 +1052,8 @@ app.get("/allclients", async (req, res) => {
           (total, order) => total + order.RemainingPayment,
           0
         );
+
+        const isAdmin = req.user.role === "admin";
 
         return {
 
@@ -625,9 +1069,9 @@ app.get("/allclients", async (req, res) => {
 
           ActiveOrders: activeOrders.length,
 
-          BalanceDue: balanceDue,
+          BalanceDue: isAdmin ? balanceDue : undefined,
 
-          Orders: clientOrders.map(order => ({
+          Orders: isAdmin ? clientOrders.map(order => ({
             _id: order._id,
             OrderID: order.OrderID,
             TotalValue: order.TotalValue,
@@ -638,7 +1082,7 @@ app.get("/allclients", async (req, res) => {
             AdvanceMode: order.AdvanceMode,
             AdvanceDate: order.AdvanceDate,
             Status: order.Status
-          }))
+          })) : undefined
 
         };
 
@@ -685,7 +1129,7 @@ const product = mongoose.model("Product", {
 });
 
 // ADDING NEW PRODUCT
-app.post("/addproduct", async (req, res) => {
+app.post("/addproduct", requireAdmin, async (req, res) => {
 
   try {
 
@@ -749,6 +1193,233 @@ app.get("/products", async (req, res) => {
       error: error.message
     });
 
+  }
+});
+
+//..........................QUOTATIONS (admin only).........................
+const quote = mongoose.model("Quote", {
+  QuoteID: { type: String, required: true, unique: true },
+  Client: { type: mongoose.Schema.Types.ObjectId, ref: "Client", default: null },
+  ProspectName: { type: String, trim: true, default: "" },
+  ProspectPhone: { type: String, trim: true, default: "" },
+  Description: { type: String, trim: true, default: "" },
+  Amount: { type: Number, required: true },
+  ValidUntil: { type: String, default: "" },
+  Status: { type: String, enum: ["Draft", "Sent", "Accepted", "Rejected", "Converted"], default: "Draft" },
+  ConvertedOrderId: { type: mongoose.Schema.Types.ObjectId, ref: "Orders", default: null },
+  CreatedAt: { type: String, default: () => new Date().toISOString() }
+});
+
+app.get("/quotes", requireAdmin, async (req, res) => {
+  try {
+    const all = await quote.find({}).sort({ CreatedAt: -1 });
+    res.status(200).json(all);
+  } catch (error) {
+    res.status(500).json({ message: "Error fetching quotations", error: error.message });
+  }
+});
+
+app.post("/quotes", requireAdmin, async (req, res) => {
+  try {
+    const { Client, ProspectName, ProspectPhone, Description, Amount, ValidUntil } = req.body;
+    const amt = Number(Amount);
+
+    if (!Number.isFinite(amt) || amt <= 0) {
+      return res.status(400).json({ message: "Enter a valid amount" });
+    }
+    if (!(Client && Client.trim()) && !(ProspectName && ProspectName.trim())) {
+      return res.status(400).json({ message: "Pick a client or enter a prospect's name" });
+    }
+
+    const prefix = `QTE-${new Date().getFullYear()}-`;
+    const latest = await quote.findOne({ QuoteID: { $regex: `^${prefix}` } }).sort({ QuoteID: -1 });
+    let num = 1;
+    if (latest) {
+      const n = parseInt(latest.QuoteID.slice(prefix.length), 10);
+      if (!isNaN(n)) num = n + 1;
+    }
+    const QuoteID = `${prefix}${String(num).padStart(4, "0")}`;
+
+    const newQuote = new quote({
+      QuoteID,
+      Client: Client && Client.trim() ? Client : null,
+      ProspectName: (ProspectName || "").trim(),
+      ProspectPhone: (ProspectPhone || "").trim(),
+      Description: (Description || "").trim(),
+      Amount: amt,
+      ValidUntil: ValidUntil || ""
+    });
+    await newQuote.save();
+
+    res.status(201).json({ message: "Quotation created", quote: newQuote });
+  } catch (error) {
+    res.status(500).json({ message: "Error creating quotation", error: error.message });
+  }
+});
+
+app.patch("/quotes/:id", requireAdmin, async (req, res) => {
+  try {
+    const q = await quote.findById(req.params.id);
+    if (!q) {
+      return res.status(404).json({ message: "Quotation not found" });
+    }
+    if (q.Status === "Converted") {
+      return res.status(400).json({ message: "This quotation has already been converted to an order" });
+    }
+
+    const { Status, Description, Amount, ValidUntil, ProspectName, ProspectPhone } = req.body;
+
+    if (Status !== undefined) {
+      if (!["Draft", "Sent", "Accepted", "Rejected"].includes(Status)) {
+        return res.status(400).json({ message: "Invalid status" });
+      }
+      q.Status = Status;
+    }
+    if (Description !== undefined) q.Description = Description.trim();
+    if (Amount !== undefined) {
+      const amt = Number(Amount);
+      if (!Number.isFinite(amt) || amt <= 0) {
+        return res.status(400).json({ message: "Enter a valid amount" });
+      }
+      q.Amount = amt;
+    }
+    if (ValidUntil !== undefined) q.ValidUntil = ValidUntil;
+    if (ProspectName !== undefined) q.ProspectName = ProspectName.trim();
+    if (ProspectPhone !== undefined) q.ProspectPhone = ProspectPhone.trim();
+
+    await q.save();
+    res.status(200).json({ message: "Quotation updated", quote: q });
+  } catch (error) {
+    res.status(500).json({ message: "Error updating quotation", error: error.message });
+  }
+});
+
+app.delete("/quotes/:id", requireAdmin, async (req, res) => {
+  try {
+    const removed = await quote.findByIdAndDelete(req.params.id);
+    if (!removed) {
+      return res.status(404).json({ message: "Quotation not found" });
+    }
+    res.status(200).json({ message: "Quotation deleted" });
+  } catch (error) {
+    res.status(500).json({ message: "Error deleting quotation", error: error.message });
+  }
+});
+
+// CONVERT A QUOTATION INTO A REAL ORDER
+app.post("/quotes/:id/convert", requireAdmin, async (req, res) => {
+  try {
+    const q = await quote.findById(req.params.id);
+    if (!q) {
+      return res.status(404).json({ message: "Quotation not found" });
+    }
+    if (q.Status === "Converted") {
+      return res.status(400).json({ message: "This quotation has already been converted" });
+    }
+
+    const clientId = (req.body.Client && req.body.Client.trim()) || (q.Client ? String(q.Client) : "");
+    if (!clientId) {
+      return res.status(400).json({ message: "Pick a client to convert this quotation into an order" });
+    }
+    const c = await client.findById(clientId);
+    if (!c || c.Deleted) {
+      return res.status(400).json({ message: "That client could not be found" });
+    }
+
+    const yearPrefix = `ORD-${new Date().getFullYear()}-`;
+    const latestOrder = await orders.findOne({ OrderID: { $regex: `^${yearPrefix}` } }).sort({ OrderID: -1 });
+    let nextNum = 1;
+    if (latestOrder) {
+      const n = parseInt(latestOrder.OrderID.slice(yearPrefix.length), 10);
+      if (!isNaN(n)) nextNum = n + 1;
+    }
+    const OrderID = `${yearPrefix}${String(nextNum).padStart(4, "0")}`;
+    const now = new Date().toISOString();
+    const today = now.slice(0, 10);
+
+    const newOrder = new orders({
+      OrderID,
+      OrderName: q.Description ? q.Description.slice(0, 60) : OrderID,
+      OrderType: "New Order",
+      Client: clientId,
+      ReceivingDate: today,
+      DeliveryDate: today,
+      Advance: 0,
+      AdvanceMode: "Cash",
+      AdvanceDate: today,
+      TotalValue: q.Amount,
+      ItemDetails: q.Description,
+      RemainingPayment: q.Amount,
+      AdvanceHistory: [],
+      History: [{ event: "Created", detail: `Order created from quotation ${q.QuoteID}`, date: now }]
+    });
+    await newOrder.save();
+
+    q.Status = "Converted";
+    q.ConvertedOrderId = newOrder._id;
+    await q.save();
+
+    res.status(201).json({ message: "Quotation converted to order", order: newOrder, quote: q });
+  } catch (error) {
+    res.status(500).json({ message: "Error converting quotation", error: error.message });
+  }
+});
+
+//..........................TEAM (admin only).........................
+// LIST TEAM MEMBERS
+app.get("/team", requireAdmin, async (req, res) => {
+  try {
+    const team = await admin.find({}, "username role");
+    res.status(200).json(team);
+  } catch (error) {
+    res.status(500).json({ message: "Error fetching team", error: error.message });
+  }
+});
+
+// ADD A TEAM MEMBER
+app.post("/team", requireAdmin, async (req, res) => {
+  try {
+    const { username, password, role } = req.body;
+
+    if (!username || !username.trim() || !password || password.length < 6) {
+      return res.status(400).json({ message: "Username and a password of at least 6 characters are required" });
+    }
+
+    const existing = await admin.findOne({ username: username.trim() });
+    if (existing) {
+      return res.status(409).json({ message: "That username is already taken" });
+    }
+
+    const hashed = await bcrypt.hash(password, 10);
+    const newMember = new admin({
+      username: username.trim(),
+      password: hashed,
+      role: role === "admin" ? "admin" : "worker"
+    });
+    await newMember.save();
+
+    res.status(201).json({
+      message: "Team member added",
+      member: { _id: newMember._id, username: newMember.username, role: newMember.role }
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Error adding team member", error: error.message });
+  }
+});
+
+// REMOVE A TEAM MEMBER
+app.delete("/team/:id", requireAdmin, async (req, res) => {
+  try {
+    if (req.params.id === req.user.id) {
+      return res.status(400).json({ message: "You can't remove your own account while logged in as it" });
+    }
+    const removed = await admin.findByIdAndDelete(req.params.id);
+    if (!removed) {
+      return res.status(404).json({ message: "Team member not found" });
+    }
+    res.status(200).json({ message: "Team member removed" });
+  } catch (error) {
+    res.status(500).json({ message: "Error removing team member", error: error.message });
   }
 });
 

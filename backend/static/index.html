@@ -140,6 +140,8 @@
   .card { background: var(--white); border: 1px solid var(--line); border-radius: var(--radius); padding: 20px; }
   .card h3 { margin: 0; font-size: 15px; font-weight: 600; }
   .card-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+  .section-title { font-size: 15px; font-weight: 600; color: var(--ink); margin: 28px 0 10px; }
+  .section-title:first-child { margin-top: 0; }
   .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 16px; }
   .stat { position: relative; overflow: hidden; }
   .stat .ic { width: 36px; height: 36px; border-radius: 10px; background: var(--green-soft); color: var(--green); display: grid; place-items: center; margin-bottom: 14px; }
@@ -326,7 +328,9 @@
   @media (hover: none) and (pointer: coarse) {
     .btn, #nav button, .link, .seg button, details.row summary { min-height: 40px; }
   }
-  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+  #view.view-enter { animation: viewIn .22s ease; }
+  @keyframes viewIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 
   /* ---------- invoice / receipt (only shown for printing) ---------- */
   .print-only { display: none; }
@@ -348,6 +352,12 @@
   .inv-table tfoot tr.strong td { font-weight: 700; font-size: 15px; border-top: 2px solid #111; padding-top: 10px; }
   .inv-status { font-size: 12px; color: #555; margin: 0 0 4px; }
   .inv-foot { font-size: 12px; color: #777; margin-top: 24px; text-align: center; }
+  .jc-top { display: flex; justify-content: space-between; gap: 20px; align-items: flex-start; }
+  .jc-info p { margin: 0 0 6px; font-size: 14px; }
+  .jc-qr { text-align: center; font-size: 11px; color: #555; flex: none; }
+  .jc-qr svg { display: block; margin-bottom: 4px; }
+  .jc-list { list-style: none; padding: 0; margin: 0 0 14px; }
+  .jc-list li { padding: 7px 0; border-bottom: 1px solid #ddd; font-size: 14px; }
   @media print {
     @page { margin: 16mm; }
     body > *:not(.print-only) { display: none !important; }
@@ -392,10 +402,13 @@
       <button data-view="orders"><span data-icon="orders"></span>Orders</button>
       <button data-view="clients"><span data-icon="clients"></span>Clients</button>
       <button data-view="products"><span data-icon="products"></span>Products</button>
+      <button data-view="quotes" data-admin-only><span data-icon="quotes"></span>Quotations</button>
+      <button data-view="trash" data-admin-only><span data-icon="trash"></span>Recently deleted</button>
+      <button data-view="team" data-admin-only><span data-icon="clients"></span>Team</button>
     </nav>
     <div class="side-foot">
       <div class="avatar-lg" id="whoAv">A</div>
-      <div class="who"><b id="whoName">Admin</b><small>Administrator</small></div>
+      <div class="who"><b id="whoName">Admin</b><small id="whoRole">Administrator</small></div>
       <button id="logout" aria-label="Log out" title="Log out"><span data-icon="logout"></span></button>
     </div>
   </aside>
@@ -428,7 +441,9 @@ const ICONS = {
   plus: '<path d="M12 5v14M5 12h14"/>',
   wallet: '<path d="M3 7a2 2 0 012-2h13v4"/><path d="M3 7v10a2 2 0 002 2h15a1 1 0 001-1V10a1 1 0 00-1-1H5a2 2 0 01-2-2z"/><circle cx="16.5" cy="14" r="1"/>',
   trend: '<path d="M3 17l6-6 4 4 8-8"/><path d="M15 7h6v6"/>',
-  download: '<path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M4 19h16"/>'
+  download: '<path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M4 19h16"/>',
+  trash: '<path d="M4 7h16"/><path d="M9 7V4h6v3"/><path d="M6 7l1 13h10l1-13"/><path d="M10 11v6"/><path d="M14 11v6"/>',
+  quotes: '<path d="M6 3h9l5 5v13a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z"/><path d="M15 3v5h5"/><path d="M8 13h8"/><path d="M8 17h5"/>'
 };
 const icon = n => `<svg class="i" viewBox="0 0 24 24" aria-hidden="true">${ICONS[n]}</svg>`;
 function paintIcons(root = document) { root.querySelectorAll('[data-icon]').forEach(el => { el.innerHTML = icon(el.dataset.icon); el.style.display = 'grid'; }); }
@@ -440,6 +455,7 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt
 const money = n => '₹' + Number(n || 0).toLocaleString('en-IN');
 const compact = n => n >= 1e7 ? (n / 1e7).toFixed(1).replace(/\.0$/, '') + 'Cr' : n >= 1e5 ? (n / 1e5).toFixed(1).replace(/\.0$/, '') + 'L' : n >= 1e3 ? (n / 1e3).toFixed(1).replace(/\.0$/, '') + 'k' : String(Math.round(n));
 const today = () => new Date().toISOString().slice(0, 10);
+const addDays = n => { const d = new Date(); d.setDate(d.getDate() + n); return d.toISOString().slice(0, 10); };
 const initial = s => esc((String(s || '?').trim()[0] || '?').toUpperCase());
 function parseDate(s) {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s || '');
@@ -487,21 +503,31 @@ function toast(msg) {
   clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), 2600);
 }
 
+let authToken = localStorage.getItem('odToken') || null;
+// Set when someone scans an order's QR code (link looks like /#order=<id>).
+let pendingOrderId = (location.hash.match(/^#order=([a-f0-9]{24})$/i) || [])[1] || null;
 async function api(path, method = 'GET', body) {
   const opts = { method, headers: {} };
+  if (authToken) opts.headers['Authorization'] = 'Bearer ' + authToken;
   if (body !== undefined) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
   let res;
   try { res = await fetch(API + path, opts); }
   catch { throw new Error('Cannot reach the server. Check that the backend is running.'); }
   let data = null;
   try { data = await res.json(); } catch {}
+  if (res.status === 401 && path !== '/login' && path !== '/signup') {
+    doLogout();
+    throw new Error((data && (data.error || data.message)) || 'Please log in again');
+  }
   if (!res.ok) throw new Error((data && (data.error || data.message)) || `Request failed (${res.status})`);
   return data;
 }
 
 /* ---------- state ---------- */
-const state = { view: 'dashboard', orders: [], clients: [], products: [], filter: 'All', q: '' };
+const state = { view: 'dashboard', role: 'admin', orders: [], clients: [], products: [], deletedOrders: [], deletedClients: [], team: [], quotes: [], filter: 'All', q: '' };
 const clientName = id => (state.clients.find(c => c._id === id) || {}).name || 'Unknown client';
+const productName = id => (state.products.find(p => p._id === id) || {}).name || '';
+const orderProfit = o => (o.TotalValue || 0) - (o.PurchaseCost || 0) - sum(o.Expenses || [], 'amount');
 const statusPill = s => `<span class="pill ${s === 'Completed' ? 'done' : ''}">${esc(s)}</span>`;
 
 /* Order types drive which stage roadmap and which extra fields apply. */
@@ -581,25 +607,36 @@ $('#authForm').addEventListener('submit', async e => {
   btn.disabled = true; $('#authErr').textContent = '';
   try {
     if (authMode === 'signup') await api('/signup', 'POST', { username, password });
-    await api('/login', 'POST', { username, password });
-    sessionStorage.setItem('admin', username);
+    const r = await api('/login', 'POST', { username, password });
+    authToken = r.token;
+    localStorage.setItem('odToken', r.token);
+    localStorage.setItem('odUsername', r.username);
+    localStorage.setItem('odUserId', r.id || '');
+    localStorage.setItem('odRole', r.role);
     $('#authForm').reset();
     showApp();
   } catch (err) { $('#authErr').textContent = err.message; }
   finally { btn.disabled = false; }
 });
 
-$('#logout').onclick = () => {
-  sessionStorage.removeItem('admin');
+function doLogout() {
+  authToken = null;
+  localStorage.removeItem('odToken');
+  localStorage.removeItem('odUsername');
+  localStorage.removeItem('odUserId');
+  localStorage.removeItem('odRole');
   $('#app').hidden = true; $('#auth').hidden = false;
   document.body.classList.remove('nav-open');
   setAuthMode('login');
-};
+}
+$('#logout').onclick = doLogout;
 
 function showApp() {
   $('#auth').hidden = true; $('#app').hidden = false;
-  const n = sessionStorage.getItem('admin') || 'Admin';
+  const n = localStorage.getItem('odUsername') || 'Admin';
+  state.role = localStorage.getItem('odRole') || 'admin';
   $('#whoName').textContent = n; $('#whoAv').textContent = (n[0] || 'A').toUpperCase();
+  const roleLabel = $('#whoRole'); if (roleLabel) roleLabel.textContent = state.role === 'admin' ? 'Administrator' : 'Worker';
   state.view = 'dashboard';
   loadAll();
 }
@@ -608,11 +645,21 @@ function showApp() {
 async function loadAll() {
   $('#view').innerHTML = '<p class="muted">Loading…</p>';
   try {
-    const [orders, clients, products] = await Promise.all([api('/orders'), api('/allclients'), api('/products')]);
+    const [orders, clients, products, team] = await Promise.all([
+      api('/orders'), api('/allclients'), api('/products'),
+      state.role === 'admin' ? api('/team') : Promise.resolve([])
+    ]);
     state.orders = orders.slice().reverse();
     state.clients = clients;
     state.products = products;
+    state.team = team;
     render();
+    if (pendingOrderId) {
+      const id = pendingOrderId; pendingOrderId = null;
+      history.replaceState(null, '', location.pathname);
+      if (state.orders.some(o => o._id === id)) { state.view = 'orders'; render(); openOrderActions(id); }
+      else toast('That order could not be found');
+    }
   } catch (err) {
     $('#view').innerHTML = `<div class="card empty"><p>${esc(err.message)}</p><button class="btn" id="retry">Try again</button></div>`;
     $('#retry').onclick = loadAll;
@@ -620,8 +667,11 @@ async function loadAll() {
 }
 
 /* ---------- nav ---------- */
+const ADMIN_ONLY_VIEWS = ['trash', 'team', 'quotes'];
 function go(view) {
+  if (ADMIN_ONLY_VIEWS.includes(view) && state.role !== 'admin') view = 'dashboard';
   state.view = view; state.q = ''; state.filter = 'All';
+  if (view === 'orders' && state.role !== 'admin') state.filter = 'My jobs';
   document.body.classList.remove('nav-open');
   render(); window.scrollTo(0, 0);
 }
@@ -631,16 +681,24 @@ $('#scrim').onclick = () => document.body.classList.remove('nav-open');
 document.addEventListener('click', e => { const g = e.target.closest('[data-goto]'); if (g) go(g.dataset.goto); });
 document.addEventListener('click', e => { const r = e.target.closest('[data-remind-client]'); if (r) { e.preventDefault(); e.stopPropagation(); remindClient(r.dataset.remindClient); } });
 
+function applyRoleUI() {
+  const isAdmin = state.role === 'admin';
+  document.querySelectorAll('[data-admin-only]').forEach(el => { el.hidden = !isAdmin; });
+}
 function render() {
+  applyRoleUI();
   document.querySelectorAll('#nav button').forEach(b => {
     if (b.dataset.view === state.view) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
   });
-  ({ dashboard: viewDashboard, orders: viewOrders, clients: viewClients, products: viewProducts })[state.view]();
+  ({ dashboard: viewDashboard, orders: viewOrders, clients: viewClients, products: viewProducts, trash: viewTrash, team: viewTeam, quotes: viewQuotes })[state.view]();
   paintIcons($('#view'));
+  const v = $('#view');
+  v.classList.remove('view-enter'); void v.offsetWidth; v.classList.add('view-enter');
 }
 
 /* ================= DASHBOARD ================= */
 function viewDashboard() {
+  const isAdmin = state.role === 'admin';
   const o = state.orders, c = state.clients;
   const active = o.filter(x => x.Status === 'Active');
   const total = sum(o, 'TotalValue'), due = sum(o, 'RemainingPayment'), collected = Math.max(total - due, 0);
@@ -652,22 +710,37 @@ function viewDashboard() {
   const recent = o.slice(0, 5);
   const hour = new Date().getHours();
   const greet = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
-  const name = sessionStorage.getItem('admin') || 'Admin';
+  const name = localStorage.getItem('odUsername') || 'Admin';
+
+  if (isAdmin && !c.length) {
+    $('#view').innerHTML = `
+      <div class="head"><div><h1 class="title">${greet}, ${esc(name)}</h1><p>Let's get Order Desk set up.</p></div></div>
+      <div class="card" style="text-align:center;padding:48px 24px">
+        <div class="ic" data-icon="clients" style="margin:0 auto 16px;width:48px;height:48px;border-radius:14px"></div>
+        <h3 style="font-size:18px;margin:0 0 6px">Add your first client</h3>
+        <p class="muted" style="margin:0 0 20px;max-width:340px;margin-left:auto;margin-right:auto">Orders belong to a client, so that's the first thing to set up. Add one, then create your first order.</p>
+        <button class="btn primary" id="addFirstClient" style="margin:0 auto"><span data-icon="plus"></span>Add a client</button>
+      </div>`;
+    $('#addFirstClient').onclick = openClientForm;
+    paintIcons($('#view'));
+    return;
+  }
 
   $('#view').innerHTML = `
     <div class="head">
       <div><h1 class="title">${greet}, ${esc(name)}</h1><p>${new Date().toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}</p></div>
-      <button class="btn primary" id="add"><span data-icon="plus"></span>New order</button>
+      ${isAdmin ? `<button class="btn primary" id="add"><span data-icon="plus"></span>New order</button>` : ''}
     </div>
 
     <div class="stats">
       <div class="card stat hero"><div class="ic" data-icon="orders"></div><span class="l">Active orders</span><strong>${active.length}</strong><small>${overdue ? overdue + ' past delivery date' : 'All on schedule'}</small></div>
-      <div class="card stat"><div class="ic" data-icon="wallet"></div><span class="l">Balance due</span><strong>${money(due)}</strong><small>Across ${o.filter(x => x.RemainingPayment > 0).length} orders</small></div>
+      ${isAdmin ? `<div class="card stat"><div class="ic" data-icon="wallet"></div><span class="l">Balance due</span><strong>${money(due)}</strong><small>Across ${o.filter(x => x.RemainingPayment > 0).length} orders</small></div>
       <div class="card stat"><div class="ic" data-icon="trend"></div><span class="l">Total order value</span><strong>${money(total)}</strong><small>${o.length} orders in total</small></div>
+      <div class="card stat"><div class="ic" data-icon="wallet"></div><span class="l">Estimated profit</span><strong>${money(o.reduce((t, x) => t + orderProfit(x), 0))}</strong><small>Total value minus cost &amp; expenses</small></div>` : `<div class="card stat"><div class="ic" data-icon="trend"></div><span class="l">My active jobs</span><strong>${active.filter(x => x.AssignedTo && x.AssignedTo === myId()).length}</strong><small>Assigned to you</small></div>`}
       <div class="card stat"><div class="ic" data-icon="clients"></div><span class="l">Clients</span><strong>${c.length}</strong><small>${state.products.length} products listed</small></div>
     </div>
 
-    <div class="grid2">
+    ${isAdmin ? `<div class="grid2">
       <div class="card chart"><div class="card-head"><h3>Order value by month</h3><span class="muted" style="font-size:13px">Last 6 months</span></div>${monthChart()}</div>
       <div class="card"><div class="card-head"><h3>Payments</h3></div>
         <div class="donut-wrap">
@@ -681,7 +754,7 @@ function viewDashboard() {
           </div>
         </div>
       </div>
-    </div>
+    </div>` : ''}
 
     <div class="grid2 even">
       <div class="card"><div class="card-head"><h3>Upcoming deliveries</h3><button class="link" data-goto="orders">View orders</button></div>
@@ -690,26 +763,28 @@ function viewDashboard() {
             <div class="grow"><b>${esc(x.OrderID)}</b><small>${esc(clientName(x.Client))} · ${fmtDate(x.DeliveryDate)}</small></div>
             ${dueBadge(x, t0)}</div>`).join('')}</div>` : '<div class="empty sm">No active orders to deliver.</div>'}
       </div>
-      <div class="card"><div class="card-head"><h3>Highest balances</h3><button class="link" data-goto="clients">View clients</button></div>
+      ${isAdmin ? `<div class="card"><div class="card-head"><h3>Highest balances</h3><button class="link" data-goto="clients">View clients</button></div>
         ${topDue.length ? `<div class="rows">${topDue.map(x => `
           <div class="r"><div class="av">${initial(x.name)}</div>
             <div class="grow"><b>${esc(x.name)}</b><small>${x.ActiveOrders} active of ${x.TotalOrders} orders</small></div>
             <span class="amt">${money(x.BalanceDue)}</span>
             <button class="btn sm" data-remind-client="${esc(x._id)}" title="Send WhatsApp reminder">Remind</button></div>`).join('')}</div>` : '<div class="empty sm">Nothing outstanding.</div>'}
-      </div>
+      </div>` : `<div class="card"><div class="card-head"><h3>Orders by type</h3></div>
+        <div class="rows">${ORDER_TYPES.map(t => { const n = o.filter(x => x.OrderType === t).length; return n ? `<div class="r"><div class="grow"><b>${esc(t)}</b></div>${typePill(t)}<span class="amt">${n}</span></div>` : ''; }).join('') || '<div class="empty sm">No orders yet.</div>'}</div>
+      </div>`}
     </div>
 
     <div class="card" style="padding:0">
       <div class="card-head" style="padding:20px 20px 0"><h3>Recent orders</h3><button class="link" data-goto="orders">See all</button></div>
       ${recent.length ? `<div class="wrap plain"><table>
-        <thead><tr><th>Order</th><th>Client</th><th>Type</th><th>Delivery</th><th class="num">Total</th><th class="num">Remaining</th><th>Status</th><th>Stage</th></tr></thead>
+        <thead><tr><th>Order</th><th>Client</th><th>Type</th><th>Delivery</th>${isAdmin ? '<th class="num">Total</th><th class="num">Remaining</th>' : ''}<th>Status</th><th>Stage</th></tr></thead>
         <tbody>${recent.map(x => `<tr><td class="strong">${esc(orderTitle(x))}</td>
           <td><div class="cellc"><span class="av sm">${initial(clientName(x.Client))}</span>${esc(clientName(x.Client))}</div></td>
           <td>${typePill(x.OrderType)}</td>
-          <td>${fmtDate(x.DeliveryDate)}</td><td class="num">${money(x.TotalValue)}</td><td class="num">${money(x.RemainingPayment)}</td>
+          <td>${fmtDate(x.DeliveryDate)}</td>${isAdmin ? `<td class="num">${money(x.TotalValue)}</td><td class="num">${money(x.RemainingPayment)}</td>` : ''}
           <td>${statusPill(x.Status)}</td><td>${stageDots(x.Stage, x.OrderType)}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty"><p>No orders yet.</p></div>'}
     </div>`;
-  $('#add').onclick = openOrderForm;
+  const addBtn = $('#add'); if (addBtn) addBtn.onclick = openOrderForm;
 }
 function dueBadge(x, t0) {
   const d = ts(x.DeliveryDate);
@@ -744,25 +819,40 @@ function monthChart() {
 }
 
 /* ================= ORDERS ================= */
+function idFromToken() {
+  try { return JSON.parse(atob((authToken || '').split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))).id || ''; }
+  catch { return ''; }
+}
+const myId = () => localStorage.getItem('odUserId') || idFromToken();
+function matchesFilter(x) {
+  switch (state.filter) {
+    case 'All': return true;
+    case 'Due': return x.RemainingPayment > 0;
+    case 'My jobs': return !!myId() && x.AssignedTo === myId();
+    case 'Unassigned': return !x.AssignedTo;
+    default: return x.Status === state.filter;
+  }
+}
 function filteredOrders() {
   const q = state.q.trim().toLowerCase();
   return state.orders.filter(x =>
-    (state.filter === 'All' || (state.filter === 'Due' ? x.RemainingPayment > 0 : x.Status === state.filter)) &&
+    matchesFilter(x) &&
     (!q || x.OrderID.toLowerCase().includes(q) || (x.OrderName || '').toLowerCase().includes(q) || clientName(x.Client).toLowerCase().includes(q)));
 }
 function viewOrders() {
+  const isAdmin = state.role === 'admin';
   const o = state.orders;
   $('#view').innerHTML = `
     <div class="head"><div><h1 class="title">Orders</h1><p>${o.length} total, ${o.filter(x => x.Status === 'Active').length} active</p></div>
-      <div style="display:flex;gap:8px"><button class="btn" id="export"><span data-icon="download"></span>Export CSV</button>
-      <button class="btn primary" id="add"><span data-icon="plus"></span>New order</button></div></div>
+      <div style="display:flex;gap:8px">${isAdmin ? `<button class="btn" id="export"><span data-icon="download"></span>Export CSV</button>
+      <button class="btn primary" id="add"><span data-icon="plus"></span>New order</button>` : ''}</div></div>
     <div class="toolbar">
       <input type="search" id="q" placeholder="Search by order name, ID or client" aria-label="Search orders" value="${esc(state.q)}">
-      <div class="seg" id="seg">${['All', 'Active', 'Completed', 'Due'].map(f => `<button data-f="${f}" aria-pressed="${state.filter === f}">${f}</button>`).join('')}</div>
+      <div class="seg" id="seg">${(isAdmin ? ['All', 'Active', 'Completed', 'Due', 'Unassigned'] : ['My jobs', 'All', 'Active', 'Completed']).map(f => `<button data-f="${f}" aria-pressed="${state.filter === f}">${f}</button>`).join('')}</div>
     </div>
     <div id="list"></div>`;
-  $('#add').onclick = openOrderForm;
-  $('#export').onclick = () => exportOrdersCSV(filteredOrders());
+  const addBtn = $('#add'); if (addBtn) addBtn.onclick = openOrderForm;
+  const exportBtn = $('#export'); if (exportBtn) exportBtn.onclick = () => exportOrdersCSV(filteredOrders());
   $('#q').oninput = e => { state.q = e.target.value; ordersTable(); };
   $('#list').onclick = e => {
     const remind = e.target.closest('[data-remind-order]');
@@ -778,23 +868,25 @@ function viewOrders() {
   ordersTable();
 }
 function ordersTable() {
+  const isAdmin = state.role === 'admin';
   const rows = filteredOrders();
   if (!rows.length) {
-    $('#list').innerHTML = `<div class="wrap"><div class="empty"><p>${state.orders.length ? 'No orders match your search.' : 'No orders yet. Create the first one.'}</p></div></div>`;
+    $('#list').innerHTML = `<div class="wrap"><div class="empty"><p>${state.filter === 'My jobs' ? 'Nothing is assigned to you yet. Tap “All” to see every order.' : state.orders.length ? 'No orders match your search.' : 'No orders yet. Create the first one.'}</p></div></div>`;
     return;
   }
   $('#list').innerHTML = `<div class="wrap"><table>
-    <thead><tr><th>Order</th><th>Client</th><th>Type</th><th>Received</th><th>Delivery</th><th class="num">Total</th><th class="num">Advance</th><th class="num">Remaining</th><th>Status</th><th>Stage</th><th></th></tr></thead>
+    <thead><tr><th>Order</th><th>Client</th><th>Type</th><th>Assigned</th><th>Received</th><th>Delivery</th>${isAdmin ? '<th class="num">Total</th><th class="num">Advance</th><th class="num">Remaining</th>' : ''}<th>Status</th><th>Stage</th><th></th></tr></thead>
     <tbody>${rows.map(x => `<tr>
       <td class="strong">${esc(orderTitle(x))}${x.OrderName && x.OrderName !== x.OrderID ? `<br><span class="muted" style="font-weight:400;font-size:12px">${esc(x.OrderID)}</span>` : ''}</td>
       <td><div class="cellc"><span class="av sm">${initial(clientName(x.Client))}</span>${esc(clientName(x.Client))}</div></td>
       <td>${typePill(x.OrderType)}</td>
+      <td>${x.AssignedName ? esc(x.AssignedName) : '<span class="muted">—</span>'}</td>
       <td>${fmtDate(x.ReceivingDate)}</td><td>${fmtDate(x.DeliveryDate)}</td>
-      <td class="num">${money(x.TotalValue)}</td><td class="num">${money(x.Advance)}</td><td class="num">${money(x.RemainingPayment)}</td>
+      ${isAdmin ? `<td class="num">${money(x.TotalValue)}</td><td class="num">${money(x.Advance)}</td><td class="num">${money(x.RemainingPayment)}</td>` : ''}
       <td>${statusPill(x.Status)}</td>
       <td>${stageDots(x.Stage, x.OrderType)}</td>
       <td class="num" style="white-space:nowrap">
-        ${x.RemainingPayment > 0 ? `<button class="btn sm" data-remind-order="${esc(x._id)}" title="Send WhatsApp reminder">Remind</button>` : ''}
+        ${isAdmin && x.RemainingPayment > 0 ? `<button class="btn sm" data-remind-order="${esc(x._id)}" title="Send WhatsApp reminder">Remind</button>` : ''}
         <button class="btn sm" data-actions="${esc(x._id)}">Actions</button></td></tr>`).join('')}</tbody></table></div>`;
 }
 
@@ -806,6 +898,10 @@ function receivingLabel(type) {
 }
 function deliveryLabel(type) { return type === 'Repairing' ? 'Expected return date' : 'Delivery date'; }
 function totalLabel(type) { return type === 'Repairing' ? 'Final billed amount (₹)' : type === 'Trading' ? 'Selling price (₹)' : 'Total value (₹)'; }
+function productOptions(selectedId) {
+  const opts = state.products.map(p => `<option value="${esc(p._id)}" ${selectedId === p._id ? 'selected' : ''}>${esc(p.name)} (${esc(p.category)})</option>`).join('');
+  return `<option value="">— No linked product (custom item) —</option>${opts}`;
+}
 
 function remindOrder(o) {
   const c = state.clients.find(x => x._id === o.Client);
@@ -844,6 +940,7 @@ function exportOrdersCSV(rows) {
     { label: 'Order ID', get: o => o.OrderID },
     { label: 'Order name', get: o => o.OrderName || '' },
     { label: 'Type', get: o => o.OrderType },
+    { label: 'Assigned to', get: o => o.AssignedName || '' },
     { label: 'Client', get: o => clientName(o.Client) },
     { label: 'Client phone', get: o => (state.clients.find(c => c._id === o.Client) || {}).Phone || '' },
     { label: 'Item / details', get: o => o.ItemDetails || '' },
@@ -854,6 +951,8 @@ function exportOrdersCSV(rows) {
     { label: 'Remaining', get: o => o.RemainingPayment },
     { label: 'Estimated cost', get: o => o.EstimatedCost || '' },
     { label: 'Purchase cost', get: o => o.PurchaseCost || '' },
+    { label: 'Expenses', get: o => sum(o.Expenses || [], 'amount') || '' },
+    { label: 'Profit', get: o => orderProfit(o) },
     { label: 'Status', get: o => o.Status },
     { label: 'Stage', get: o => { const s = STAGE_SETS[o.OrderType] || STAGE_SETS['New Order']; return `${o.Stage || 1} of ${s.length} — ${s[(o.Stage || 1) - 1]}`; } }
   ];
@@ -872,6 +971,34 @@ function exportClientsCSV(rows) {
   ];
   downloadCSV(toCSV(rows, headers), `clients-${today()}.csv`);
   toast(`Exported ${rows.length} client${rows.length === 1 ? '' : 's'}`);
+}
+
+function printStatement(c) {
+  if (!c) return;
+  const os = clientOrders(c._id).slice().sort((a, b) => ts(a.ReceivingDate) - ts(b.ReceivingDate));
+  const totalBilled = sum(os, 'TotalValue'), totalPaid = sum(os, 'Advance'), totalDue = sum(os, 'RemainingPayment');
+  const html = `
+    <div class="inv">
+      <div class="inv-head">
+        <div><h1>Primova</h1><p>Prime Solutions. Real Results.</p></div>
+        <div class="inv-meta"><h2>Statement of account</h2><p>${new Date().toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}</p></div>
+      </div>
+      <div class="inv-parties">
+        <div><b>Client</b><p>${esc(c.name)}</p>${c.Add ? `<p>${esc(c.Add)}</p>` : ''}${c.Phone ? `<p>${esc(c.Phone)}</p>` : ''}</div>
+        <div><b>Summary</b><p>${os.length} order${os.length === 1 ? '' : 's'} on record</p><p>${os.filter(o => o.Status === 'Active').length} active</p></div>
+      </div>
+      <table class="inv-table">
+        <thead><tr><th>Order</th><th>Date</th><th class="num">Total</th><th class="num">Paid</th><th class="num">Due</th></tr></thead>
+        <tbody>${os.map(o => `<tr><td>${esc(orderTitle(o))}</td><td>${fmtDate(o.ReceivingDate)}</td><td class="num">${money(o.TotalValue)}</td><td class="num">${money(o.Advance)}</td><td class="num">${money(o.RemainingPayment)}</td></tr>`).join('')}</tbody>
+        <tfoot>
+          <tr><td colspan="2">Total</td><td class="num">${money(totalBilled)}</td><td class="num">${money(totalPaid)}</td><td class="num">${money(totalDue)}</td></tr>
+          <tr class="strong"><td colspan="4">Balance due</td><td class="num">${money(totalDue)}</td></tr>
+        </tfoot>
+      </table>
+      <p class="inv-foot">Thank you for your business — Primova</p>
+    </div>`;
+  $('#invoicePrint').innerHTML = html;
+  setTimeout(() => window.print(), 50);
 }
 
 function printInvoice(o) {
@@ -907,6 +1034,135 @@ function printInvoice(o) {
   setTimeout(() => window.print(), 50);
 }
 
+function teamOptions(selectedId) {
+  return `<option value="">— Unassigned —</option>` + state.team.map(m =>
+    `<option value="${esc(m._id)}" ${selectedId === m._id ? 'selected' : ''}>${esc(m.username)} (${m.role === 'admin' ? 'admin' : 'worker'})</option>`).join('');
+}
+
+/* ---- update the client on WhatsApp (never includes money) ---- */
+function sendStageUpdate(o) {
+  const c = state.clients.find(x => x._id === o.Client);
+  if (!c) { toast('Client not found'); return; }
+  const stages = STAGE_SETS[o.OrderType] || STAGE_SETS['New Order'];
+  const st = Math.min(o.Stage || 1, stages.length);
+  const msg = `Hi ${c.name}, an update on your order ${orderTitle(o)}: it is now at "${stages[st - 1]}" (step ${st} of ${stages.length}).${o.DeliveryDate ? ` Expected delivery: ${fmtDate(o.DeliveryDate)}.` : ''} Thank you! — Primova`;
+  window.open(waLink(c.Phone, msg), '_blank');
+}
+function offerClientUpdate(o) {
+  const c = state.clients.find(x => x._id === o.Client);
+  if (!c) return;
+  const stages = STAGE_SETS[o.OrderType] || STAGE_SETS['New Order'];
+  const st = Math.min(o.Stage || 1, stages.length);
+  const dlg = $('#dlg');
+  dlg.innerHTML = `<h2>Tell ${esc(c.name)}?</h2>
+    <p class="muted" style="margin-top:0">${esc(orderTitle(o))} is now at “${esc(stages[st - 1])}”. Send them a quick WhatsApp update.</p>
+    <div class="actions"><button type="button" class="btn" id="cancel">Not now</button>
+      <button type="button" class="btn primary" id="sendUpd">Send on WhatsApp</button></div>`;
+  $('#cancel').onclick = () => dlg.close();
+  $('#sendUpd').onclick = () => { dlg.close(); sendStageUpdate(o); };
+  dlg.showModal();
+}
+
+/* ---- job card with a QR code that opens the order when scanned ---- */
+let qrPromise = null;
+function loadQR() {
+  if (window.qrcode) return Promise.resolve();
+  if (!qrPromise) {
+    const sources = ['https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js', 'https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js'];
+    qrPromise = new Promise((resolve, reject) => {
+      const tryNext = i => {
+        if (i >= sources.length) { qrPromise = null; reject(new Error('qr')); return; }
+        const sc = document.createElement('script');
+        sc.src = sources[i];
+        sc.onload = () => window.qrcode ? resolve() : tryNext(i + 1);
+        sc.onerror = () => tryNext(i + 1);
+        document.head.appendChild(sc);
+      };
+      tryNext(0);
+    });
+  }
+  return qrPromise;
+}
+async function printJobCard(o) {
+  try { await loadQR(); } catch { toast('The QR code needs an internet connection the first time.'); return; }
+  const c = state.clients.find(x => x._id === o.Client) || {};
+  const stages = STAGE_SETS[o.OrderType] || STAGE_SETS['New Order'];
+  const st = Math.min(o.Stage || 1, stages.length);
+  const qr = window.qrcode(0, 'M');
+  qr.addData(`${location.origin}/#order=${o._id}`);
+  qr.make();
+  const n = qr.getModuleCount(), quiet = 2;
+  let path = '';
+  for (let r = 0; r < n; r++) for (let col = 0; col < n; col++) if (qr.isDark(r, col)) path += `M${col},${r}h1v1h-1z`;
+  const svg = `<svg viewBox="${-quiet} ${-quiet} ${n + quiet * 2} ${n + quiet * 2}" width="150" height="150" shape-rendering="crispEdges"><rect x="${-quiet}" y="${-quiet}" width="${n + quiet * 2}" height="${n + quiet * 2}" fill="#fff"/><path d="${path}" fill="#000"/></svg>`;
+  $('#invoicePrint').innerHTML = `
+    <div class="inv">
+      <div class="inv-head">
+        <div><h1>Job card</h1><p>${esc(o.OrderID)} · ${esc(o.OrderType)}</p></div>
+        <div class="inv-meta"><h2>Primova</h2><p>Prime Solutions. Real Results.</p></div>
+      </div>
+      <div class="jc-top">
+        <div class="jc-info">
+          <h2 style="margin:0 0 10px;font-size:20px">${esc(orderTitle(o))}</h2>
+          <p><b>Client:</b> ${esc(c.name || 'Unknown client')}</p>
+          ${o.ItemDetails ? `<p><b>${esc(itemLabel(o.OrderType))}:</b> ${esc(o.ItemDetails)}</p>` : ''}
+          <p><b>${esc(receivingLabel(o.OrderType))}:</b> ${fmtDate(o.ReceivingDate)}</p>
+          <p><b>${esc(deliveryLabel(o.OrderType))}:</b> ${fmtDate(o.DeliveryDate)}</p>
+          ${o.AssignedName ? `<p><b>Assigned to:</b> ${esc(o.AssignedName)}</p>` : ''}
+        </div>
+        <div class="jc-qr">${svg}<div>Scan to open this order</div></div>
+      </div>
+      <h3 style="margin:22px 0 6px;font-size:14px">Progress</h3>
+      <ul class="jc-list">${stages.map((l, i) => `<li>${i + 1 <= st ? '☑' : '☐'} ${i + 1}. ${esc(l)}</li>`).join('')}</ul>
+      <p class="inv-foot">Notes: ______________________________________________</p>
+    </div>`;
+  setTimeout(() => window.print(), 50);
+}
+
+function openOrderExpenses(o) {
+  const dlg = $('#dlg');
+  const render = () => {
+    const exps = o.Expenses || [];
+    const profit = orderProfit(o);
+    const margin = o.TotalValue ? Math.round(profit / o.TotalValue * 100) : 0;
+    dlg.innerHTML = `<h2>Expenses — ${esc(orderTitle(o))}</h2>
+      <p class="calc" style="margin-top:0">Total value ${money(o.TotalValue)}${o.PurchaseCost ? ` · Purchase cost ${money(o.PurchaseCost)}` : ''} · Expenses ${money(sum(exps, 'amount'))}</p>
+      <p class="calc"><strong>Profit: ${money(profit)}</strong> ${o.TotalValue ? `(${margin}% margin)` : ''}</p>
+      ${exps.length ? `<div class="wrap"><table><thead><tr><th>Item</th><th class="num">Amount</th><th></th></tr></thead>
+        <tbody>${exps.map(e => `<tr><td>${esc(e.label)}</td><td class="num">${money(e.amount)}</td>
+          <td class="num"><button type="button" class="btn sm" data-del-exp="${esc(e._id)}">Remove</button></td></tr>`).join('')}</tbody></table></div>`
+        : '<p class="muted">No expenses logged yet.</p>'}
+      <div class="two" style="margin-top:14px">
+        <div class="field"><label for="expLabel">Expense</label><input id="expLabel" placeholder="e.g. Steel sheet"></div>
+        <div class="field"><label for="expAmt">Amount (₹)</label><input id="expAmt" type="number" min="0" step="any" inputmode="decimal"></div>
+      </div>
+      <div class="actions"><button type="button" class="btn" id="cancel">Close</button><button type="button" class="btn primary" id="addExp">Add expense</button></div>`;
+    $('#cancel').onclick = () => dlg.close();
+    $('#addExp').onclick = async () => {
+      const label = $('#expLabel').value.trim(), amt = +$('#expAmt').value;
+      if (!label || !amt || amt <= 0) { toast('Enter an expense label and a positive amount'); return; }
+      try {
+        const r = await api(`/orders/${encodeURIComponent(o._id)}/expenses`, 'POST', { label, amount: amt });
+        o = r.order;
+        patchOrder(r.order);
+        render();
+      } catch (err) { toast(err.message); }
+    };
+    dlg.querySelectorAll('[data-del-exp]').forEach(btn => {
+      btn.onclick = async () => {
+        try {
+          const r = await api(`/orders/${encodeURIComponent(o._id)}/expenses/${btn.dataset.delExp}`, 'DELETE');
+          o = r.order;
+          patchOrder(r.order);
+          render();
+        } catch (err) { toast(err.message); }
+      };
+    });
+  };
+  render();
+  dlg.showModal();
+}
+
 function openOrderHistory(o) {
   const dlg = $('#dlg');
   const hist = (o.History || []).slice().reverse();
@@ -925,8 +1181,8 @@ function openOrderPhotos(o) {
     const photos = o.Photos || [];
     dlg.innerHTML = `<h2>Photos — ${esc(orderTitle(o))}</h2>
       ${photos.length ? `<div class="photo-grid">${photos.map(p => `
-        <div class="photo"><img src="${p.url}" alt="${esc(p.caption || 'Order photo')}">
-          <button type="button" class="photo-del" data-pid="${esc(p._id)}" title="Remove">✕</button>
+        <div class="photo"><img src="${esc(p.url)}" alt="${esc(p.caption || 'Order photo')}">
+          ${state.role === 'admin' ? `<button type="button" class="photo-del" data-pid="${esc(p._id)}" title="Remove">✕</button>` : ''}
           ${p.caption ? `<span class="photo-cap">${esc(p.caption)}</span>` : ''}</div>`).join('')}</div>`
         : '<p class="muted" style="margin-top:0">No photos yet.</p>'}
       <label class="btn primary" style="display:inline-flex;margin-top:14px;cursor:pointer">
@@ -965,36 +1221,53 @@ function openOrderPhotos(o) {
 }
 
 function openOrderActions(id) {
+  const isAdmin = state.role === 'admin';
   const o = state.orders.find(x => x._id === id);
   if (!o) return;
   const stages = STAGE_SETS[o.OrderType] || STAGE_SETS['New Order'];
   const dlg = $('#dlg');
   dlg.innerHTML = `<h2>${esc(orderTitle(o))}</h2>
-    <p class="muted" style="margin-top:-14px;margin-bottom:18px">${esc(o.OrderID)} · ${esc(o.OrderType)}</p>
+    <p class="muted" style="margin-top:-14px;margin-bottom:18px">${esc(o.OrderID)} · ${esc(o.OrderType)}${o.Product ? ` · ${esc(productName(o.Product))}` : ''}${o.AssignedName ? ` · ${esc(o.AssignedName)}` : ''}</p>
     <div class="two">
       <div class="field"><label for="ordStatus">Status</label>
         <select id="ordStatus">${['Active', 'Completed'].map(s => `<option value="${s}" ${o.Status === s ? 'selected' : ''}>${s}</option>`).join('')}</select></div>
       <div class="field"><label for="ordStage">Stage</label>
         <select id="ordStage">${stages.map((label, i) => `<option value="${i + 1}" ${o.Stage === i + 1 ? 'selected' : ''}>${i + 1}. ${esc(label)}</option>`).join('')}</select></div>
     </div>
+    ${isAdmin ? `<div class="field"><label for="ordAssign">Assigned to</label><select id="ordAssign">${teamOptions(o.AssignedTo)}</select></div>` : ''}
     <div class="sheet" style="margin-top:4px">
-      <button type="button" class="sheet-item" id="editBtn">Edit order details</button>
+      <button type="button" class="sheet-item" id="updBtn">Send update to client (WhatsApp)</button>
+      <button type="button" class="sheet-item" id="cardBtn">Job card with QR (print)</button>
       <button type="button" class="sheet-item" id="photosBtn">Photos${o.Photos && o.Photos.length ? ` (${o.Photos.length})` : ''}</button>
+      ${isAdmin ? `<button type="button" class="sheet-item" id="editBtn">Edit order details</button>
+      <button type="button" class="sheet-item" id="expBtn">Expenses & profit (${money(orderProfit(o))})</button>
       <button type="button" class="sheet-item" id="invBtn">${o.RemainingPayment > 0 ? 'Invoice' : 'Receipt'} (print / save PDF)</button>
       ${o.RemainingPayment > 0 ? `<button type="button" class="sheet-item" id="advBtn">Add advance payment</button>` : ''}
       ${o.RemainingPayment > 0 ? `<button type="button" class="sheet-item" id="remindBtn">Send payment reminder (WhatsApp)</button>` : ''}
       <button type="button" class="sheet-item" id="histBtn">View order history</button>
-      <button type="button" class="sheet-item danger" id="delBtn">Delete order</button>
+      <button type="button" class="sheet-item danger" id="delBtn">Delete order</button>` : ''}
     </div>
     <div class="actions"><button type="button" class="btn" id="cancel">Close</button></div>`;
   $('#cancel').onclick = () => dlg.close();
-  $('#editBtn').onclick = () => { dlg.close(); editOrderForm(o); };
   $('#photosBtn').onclick = () => { dlg.close(); openOrderPhotos(o); };
-  $('#invBtn').onclick = () => { dlg.close(); printInvoice(o); };
+  $('#updBtn').onclick = () => { dlg.close(); sendStageUpdate(o); };
+  $('#cardBtn').onclick = () => { dlg.close(); printJobCard(o); };
+  const assignSel = $('#ordAssign');
+  if (assignSel) assignSel.onchange = async e => {
+    try {
+      const r = await api(`/orders/${encodeURIComponent(o._id)}/assign`, 'PATCH', { AssignedTo: e.target.value });
+      toast(r.order.AssignedName ? `${orderTitle(o)} assigned to ${r.order.AssignedName}` : `${orderTitle(o)} unassigned`);
+      dlg.close();
+      patchOrder(r.order);
+    } catch (err) { toast(err.message); e.target.value = o.AssignedTo || ''; }
+  };
+  const editBtn = $('#editBtn'); if (editBtn) editBtn.onclick = () => { dlg.close(); editOrderForm(o); };
+  const invBtn = $('#invBtn'); if (invBtn) invBtn.onclick = () => { dlg.close(); printInvoice(o); };
+  const expBtn = $('#expBtn'); if (expBtn) expBtn.onclick = () => { dlg.close(); openOrderExpenses(o); };
   const advBtn = $('#advBtn'); if (advBtn) advBtn.onclick = () => { dlg.close(); addAdvanceForm(o); };
   const remindBtn = $('#remindBtn'); if (remindBtn) remindBtn.onclick = () => { dlg.close(); remindOrder(o); };
-  $('#histBtn').onclick = () => { dlg.close(); openOrderHistory(o); };
-  $('#delBtn').onclick = () => { dlg.close(); deleteOrder(o); };
+  const histBtn = $('#histBtn'); if (histBtn) histBtn.onclick = () => { dlg.close(); openOrderHistory(o); };
+  const delBtn = $('#delBtn'); if (delBtn) delBtn.onclick = () => { dlg.close(); deleteOrder(o); };
 
   // Dropdowns apply immediately on change — no separate submit step, and
   // only the affected order is patched into local state (no full reload).
@@ -1020,6 +1293,7 @@ function openOrderActions(id) {
       toast(`${orderTitle(o)} moved to "${stages[step - 1]}"`);
       dlg.close();
       patchOrder(r.order);
+      if (step >= stages.length - 1) offerClientUpdate(r.order);
     } catch (err) { toast(err.message); e.target.value = o.Stage; }
   };
   dlg.showModal();
@@ -1028,6 +1302,8 @@ function openOrderActions(id) {
 function editOrderForm(o) {
   const fields = `
     <div class="field"><label for="OrderName">Order name</label><input id="OrderName" name="OrderName" value="${esc(o.OrderName && o.OrderName !== o.OrderID ? o.OrderName : '')}" placeholder="${esc(o.OrderID)}"></div>
+    ${state.products.length ? `<div class="field"><label for="Product">Linked product (optional)</label>
+      <select id="Product" name="Product">${productOptions(o.Product || '')}</select></div>` : ''}
     <div class="field"><label for="ItemDetails">${esc(itemLabel(o.OrderType))}</label><input id="ItemDetails" name="ItemDetails" value="${esc(o.ItemDetails || '')}"></div>
     <div class="two">
       <div class="field"><label for="ReceivingDate">${esc(receivingLabel(o.OrderType))}</label><input id="ReceivingDate" name="ReceivingDate" type="date" value="${esc(o.ReceivingDate)}" required></div>
@@ -1043,7 +1319,7 @@ function editOrderForm(o) {
     if (d.DeliveryDate < d.ReceivingDate) throw new Error('Delivery date cannot be before the receiving date.');
     const r = await api(`/orders/${encodeURIComponent(o._id)}`, 'PATCH', {
       OrderName: d.OrderName, ReceivingDate: d.ReceivingDate, DeliveryDate: d.DeliveryDate, TotalValue: total,
-      ItemDetails: d.ItemDetails, EstimatedCost: d.EstimatedCost, PurchaseCost: d.PurchaseCost
+      ItemDetails: d.ItemDetails, EstimatedCost: d.EstimatedCost, PurchaseCost: d.PurchaseCost, Product: d.Product
     });
     toast(`${orderTitle(o)} updated`);
     patchOrder(r.order);
@@ -1089,6 +1365,10 @@ function openOrderForm() {
     <div class="field"><label for="OrderName">Order name (optional)</label><input id="OrderName" name="OrderName" placeholder="e.g. Gate hinges — Sharma Steel"></div>
     <div class="field"><label for="Client">Client</label>
       <select id="Client" name="Client" required>${state.clients.map(c => `<option value="${esc(c._id)}">${esc(c.name)} (${esc(c.Phone)})</option>`).join('')}</select></div>
+    ${state.role === 'admin' && state.team.length ? `<div class="field"><label for="AssignedTo">Assign to (optional)</label>
+      <select id="AssignedTo" name="AssignedTo">${teamOptions('')}</select></div>` : ''}
+    ${state.products.length ? `<div class="field"><label for="Product">Product (optional)</label>
+      <select id="Product" name="Product">${productOptions('')}</select></div>` : ''}
     <div class="field"><label for="ItemDetails" id="itemLbl">Item details</label><input id="ItemDetails" name="ItemDetails"></div>
     <div class="two">
       <div class="field"><label for="ReceivingDate" id="recvLbl">Receiving date</label><input id="ReceivingDate" name="ReceivingDate" type="date" value="${today()}" required></div>
@@ -1127,6 +1407,11 @@ function openOrderForm() {
     };
     $('#OrderType').onchange = applyType;
     applyType();
+    const prodSel = $('#Product');
+    if (prodSel) prodSel.onchange = () => {
+      const p = state.products.find(x => x._id === prodSel.value);
+      if (p && !$('#ItemDetails').value.trim()) $('#ItemDetails').value = `${p.name} — ${p.desc}`;
+    };
   });
 }
 
@@ -1136,54 +1421,59 @@ function filteredClients() {
   return state.clients.filter(c => !q || c.name.toLowerCase().includes(q) || c.Phone.includes(q));
 }
 function viewClients() {
+  const isAdmin = state.role === 'admin';
   const totalDue = sum(state.orders, 'RemainingPayment');
   $('#view').innerHTML = `
-    <div class="head"><div><h1 class="title">Clients</h1><p>${state.clients.length} clients, ${money(totalDue)} outstanding</p></div>
-      <div style="display:flex;gap:8px"><button class="btn" id="export"><span data-icon="download"></span>Export CSV</button>
-      <button class="btn primary" id="add"><span data-icon="plus"></span>New client</button></div></div>
+    <div class="head"><div><h1 class="title">Clients</h1><p>${state.clients.length} clients${isAdmin ? `, ${money(totalDue)} outstanding` : ''}</p></div>
+      <div style="display:flex;gap:8px">${isAdmin ? `<button class="btn" id="export"><span data-icon="download"></span>Export CSV</button>
+      <button class="btn primary" id="add"><span data-icon="plus"></span>New client</button>` : ''}</div></div>
     <div class="toolbar"><input type="search" id="q" placeholder="Search by name or phone" aria-label="Search clients" value="${esc(state.q)}"></div>
     <div id="list"></div>`;
-  $('#add').onclick = openClientForm;
-  $('#export').onclick = () => exportClientsCSV(filteredClients());
+  const addBtn = $('#add'); if (addBtn) addBtn.onclick = openClientForm;
+  const exportBtn = $('#export'); if (exportBtn) exportBtn.onclick = () => exportClientsCSV(filteredClients());
   $('#q').oninput = e => { state.q = e.target.value; clientsList(); };
   $('#list').onclick = e => {
     const remindC = e.target.closest('[data-remind-client]');
+    const stmt = e.target.closest('[data-statement-client]');
     const edit = e.target.closest('[data-edit-client]');
     const del = e.target.closest('[data-delete-client]');
     if (remindC) { /* handled by the global data-remind-client listener */ }
+    else if (stmt) { e.preventDefault(); printStatement(state.clients.find(x => x._id === stmt.dataset.statementClient)); }
     else if (edit) { e.preventDefault(); editClientForm(edit.dataset.editClient); }
     else if (del) { e.preventDefault(); deleteClient(del.dataset.deleteClient); }
   };
   clientsList();
 }
 function clientsList() {
+  const isAdmin = state.role === 'admin';
   const rows = filteredClients();
   if (!rows.length) {
     $('#list').innerHTML = `<div class="wrap"><div class="empty"><p>${state.clients.length ? 'No clients match your search.' : 'No clients yet. Add your first client.'}</p></div></div>`;
     return;
   }
   $('#list').innerHTML = `<div class="wrap">
-    <div class="list-head grid"><span>Name</span><span>Phone</span><span>Orders</span><span>Active</span><span class="num">Balance due</span></div>
+    <div class="list-head grid">${isAdmin ? '<span>Name</span><span>Phone</span><span>Orders</span><span>Active</span><span class="num">Balance due</span>' : '<span>Name</span><span>Phone</span><span>Orders</span><span>Active</span>'}</div>
     ${rows.map(c => {
       const stats = clientStats(c._id);
       const os = clientOrders(c._id);
       return `<details class="row"><summary class="grid">
         <span class="cellc"><span class="av sm">${initial(c.name)}</span><span class="strong">${esc(c.name)}</span></span>
-        <span>${esc(c.Phone)}</span><span>${stats.TotalOrders}</span><span>${stats.ActiveOrders}</span><span class="num strong">${money(stats.BalanceDue)}</span>
+        <span>${esc(c.Phone)}</span><span>${stats.TotalOrders}</span><span>${stats.ActiveOrders}</span>${isAdmin ? `<span class="num strong">${money(stats.BalanceDue)}</span>` : ''}
       </summary>
       <div class="detail">
         <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:12px">
           <p class="addr" style="margin:0">${esc(c.Add)}</p>
-          <div style="display:flex;gap:8px;flex:none">
+          ${isAdmin ? `<div style="display:flex;gap:8px;flex:none;flex-wrap:wrap;justify-content:flex-end">
+            ${os.length ? `<button class="btn sm" data-statement-client="${esc(c._id)}">Statement</button>` : ''}
             ${stats.BalanceDue > 0 ? `<button class="btn sm" data-remind-client="${esc(c._id)}">Remind</button>` : ''}
             <button class="btn sm" data-edit-client="${esc(c._id)}">Edit</button>
             <button class="btn sm" data-delete-client="${esc(c._id)}">Delete</button>
-          </div>
+          </div>` : ''}
         </div>
         ${os.length ? `<div class="wrap"><table>
-          <thead><tr><th>Order</th><th>Type</th><th>Delivery</th><th class="num">Total</th><th class="num">Advance</th><th class="num">Remaining</th><th>Status</th><th>Stage</th></tr></thead>
+          <thead><tr><th>Order</th><th>Type</th><th>Delivery</th>${isAdmin ? '<th class="num">Total</th><th class="num">Advance</th><th class="num">Remaining</th>' : ''}<th>Status</th><th>Stage</th></tr></thead>
           <tbody>${os.map(o => `<tr><td class="strong">${esc(orderTitle(o))}</td><td>${typePill(o.OrderType)}</td><td>${fmtDate(o.DeliveryDate)}</td>
-            <td class="num">${money(o.TotalValue)}</td><td class="num">${money(o.Advance)}</td><td class="num">${money(o.RemainingPayment)}</td>
+            ${isAdmin ? `<td class="num">${money(o.TotalValue)}</td><td class="num">${money(o.Advance)}</td><td class="num">${money(o.RemainingPayment)}</td>` : ''}
             <td>${statusPill(o.Status)}</td><td>${stageDots(o.Stage, o.OrderType)}</td></tr>`).join('')}</tbody></table></div>` : '<p class="muted" style="margin:0">No orders yet for this client.</p>'}
       </div></details>`;
     }).join('')}</div>`;
@@ -1225,12 +1515,13 @@ function deleteClient(id) {
 
 /* ================= PRODUCTS ================= */
 function viewProducts() {
+  const isAdmin = state.role === 'admin';
   $('#view').innerHTML = `
     <div class="head"><div><h1 class="title">Products</h1><p>${state.products.length} products in ${new Set(state.products.map(p => p.category)).size} categories</p></div>
-      <button class="btn primary" id="add"><span data-icon="plus"></span>New product</button></div>
+      ${isAdmin ? `<button class="btn primary" id="add"><span data-icon="plus"></span>New product</button>` : ''}</div>
     <div class="toolbar"><input type="search" id="q" placeholder="Search by name or category" aria-label="Search products" value="${esc(state.q)}"></div>
     <div id="list"></div>`;
-  $('#add').onclick = openProductForm;
+  const addBtn = $('#add'); if (addBtn) addBtn.onclick = openProductForm;
   $('#q').oninput = e => { state.q = e.target.value; productsGrid(); };
   productsGrid();
 }
@@ -1241,8 +1532,11 @@ function productsGrid() {
     $('#list').innerHTML = `<div class="card empty"><p>${state.products.length ? 'No products match your search.' : 'No products yet. Add your first product.'}</p></div>`;
     return;
   }
-  $('#list').innerHTML = `<div class="prod-grid">${rows.map(p => `
-    <div class="card prod"><small>${esc(p.ProductID)}</small><b>${esc(p.name)}</b><p>${esc(p.desc)}</p><div><span class="pill">${esc(p.category)}</span></div></div>`).join('')}</div>`;
+  $('#list').innerHTML = `<div class="prod-grid">${rows.map(p => {
+    const used = state.orders.filter(o => o.Product === p._id).length;
+    return `<div class="card prod"><small>${esc(p.ProductID)}</small><b>${esc(p.name)}</b><p>${esc(p.desc)}</p>
+      <div><span class="pill">${esc(p.category)}</span>${used ? `<span class="pill" style="margin-left:6px">${used} order${used === 1 ? '' : 's'}</span>` : ''}</div></div>`;
+  }).join('')}</div>`;
 }
 function openProductForm() {
   const cats = [...new Set(state.products.map(p => p.category))];
@@ -1257,6 +1551,319 @@ function openProductForm() {
     state.products.push(r.product);
     render();
   });
+}
+
+/* ================= RECENTLY DELETED ================= */
+async function viewTrash() {
+  $('#view').innerHTML = `
+    <div class="head"><div><h1 class="title">Recently deleted</h1><p>Restore an order or client, or remove it for good.</p></div></div>
+    <div class="empty" style="margin-top:12px"><p>Loading…</p></div>`;
+  try {
+    const [delOrders, delClients] = await Promise.all([
+      api('/orders/deleted'),
+      api('/clients/deleted')
+    ]);
+    state.deletedOrders = delOrders;
+    state.deletedClients = delClients;
+    renderTrash();
+  } catch (err) {
+    $('#view').innerHTML += `<div class="card empty"><p>${esc(err.message)}</p></div>`;
+  }
+}
+function renderTrash() {
+  const dOrders = state.deletedOrders || [];
+  const dClients = state.deletedClients || [];
+  const findAnyClientName = id => (state.clients.find(c => c._id === id) || state.deletedClients.find(c => c._id === id) || {}).name || 'Unknown client';
+  $('#view').innerHTML = `
+    <div class="head"><div><h1 class="title">Recently deleted</h1><p>Restore an order or client, or remove it for good.</p></div></div>
+    <h3 class="section-title">Deleted orders (${dOrders.length})</h3>
+    ${dOrders.length ? `<div class="wrap"><table>
+      <thead><tr><th>Order</th><th>Client</th><th>Type</th><th class="num">Total</th><th>Deleted</th><th></th></tr></thead>
+      <tbody>${dOrders.map(o => `<tr>
+        <td class="strong">${esc(orderTitle(o))}</td>
+        <td>${esc(findAnyClientName(o.Client))}</td>
+        <td>${typePill(o.OrderType)}</td>
+        <td class="num">${money(o.TotalValue)}</td>
+        <td>${fmtDate(o.DeletedAt)}</td>
+        <td class="num" style="white-space:nowrap">
+          <button class="btn sm" data-restore-order="${esc(o._id)}">Restore</button>
+          <button class="btn sm" data-purge-order="${esc(o._id)}">Delete forever</button>
+        </td></tr>`).join('')}</tbody></table></div>`
+      : '<div class="wrap"><div class="empty"><p>No deleted orders.</p></div></div>'}
+    <h3 class="section-title">Deleted clients (${dClients.length})</h3>
+    ${dClients.length ? `<div class="wrap"><table>
+      <thead><tr><th>Name</th><th>Phone</th><th>Deleted</th><th></th></tr></thead>
+      <tbody>${dClients.map(c => `<tr>
+        <td class="strong">${esc(c.name)}</td><td>${esc(c.Phone)}</td><td>${fmtDate(c.DeletedAt)}</td>
+        <td class="num" style="white-space:nowrap">
+          <button class="btn sm" data-restore-client="${esc(c._id)}">Restore</button>
+          <button class="btn sm" data-purge-client="${esc(c._id)}">Delete forever</button>
+        </td></tr>`).join('')}</tbody></table></div>`
+      : '<div class="wrap"><div class="empty"><p>No deleted clients.</p></div></div>'}`;
+
+  $('#view').onclick = async e => {
+    const ro = e.target.closest('[data-restore-order]');
+    const po = e.target.closest('[data-purge-order]');
+    const rc = e.target.closest('[data-restore-client]');
+    const pc = e.target.closest('[data-purge-client]');
+
+    if (ro) {
+      try {
+        const r = await api(`/orders/${encodeURIComponent(ro.dataset.restoreOrder)}/restore`, 'POST');
+        state.orders.unshift(r.order);
+        state.deletedOrders = state.deletedOrders.filter(x => x._id !== r.order._id);
+        toast(`${orderTitle(r.order)} restored`);
+        renderTrash();
+      } catch (err) { toast(err.message); }
+    } else if (po) {
+      if (!confirm('Permanently delete this order? This cannot be undone.')) return;
+      try {
+        await api(`/orders/${encodeURIComponent(po.dataset.purgeOrder)}/forever`, 'DELETE');
+        state.deletedOrders = state.deletedOrders.filter(x => x._id !== po.dataset.purgeOrder);
+        toast('Order permanently deleted');
+        renderTrash();
+      } catch (err) { toast(err.message); }
+    } else if (rc) {
+      try {
+        const r = await api(`/clients/${encodeURIComponent(rc.dataset.restoreClient)}/restore`, 'POST');
+        state.clients.push(r.client);
+        state.deletedClients = state.deletedClients.filter(x => x._id !== r.client._id);
+        toast(`${r.client.name} restored`);
+        renderTrash();
+      } catch (err) { toast(err.message); }
+    } else if (pc) {
+      if (!confirm('Permanently delete this client? This cannot be undone.')) return;
+      try {
+        await api(`/clients/${encodeURIComponent(pc.dataset.purgeClient)}/forever`, 'DELETE');
+        state.deletedClients = state.deletedClients.filter(x => x._id !== pc.dataset.purgeClient);
+        toast('Client permanently deleted');
+        renderTrash();
+      } catch (err) { toast(err.message); }
+    }
+  };
+  paintIcons($('#view'));
+}
+
+/* ================= TEAM (admin only) ================= */
+async function viewTeam() {
+  $('#view').innerHTML = `
+    <div class="head"><div><h1 class="title">Team</h1><p>Give staff their own login. Workers can view orders and update stage, status and photos — they never see money figures.</p></div></div>
+    <div class="empty" style="margin-top:12px"><p>Loading…</p></div>`;
+  try {
+    state.team = await api('/team');
+    renderTeam();
+  } catch (err) {
+    $('#view').innerHTML += `<div class="card empty"><p>${esc(err.message)}</p></div>`;
+  }
+}
+function renderTeam() {
+  const me = localStorage.getItem('odUsername');
+  $('#view').innerHTML = `
+    <div class="head"><div><h1 class="title">Team</h1><p>Give staff their own login. Workers can view orders and update stage, status and photos — they never see money figures.</p></div>
+      <button class="btn primary" id="add"><span data-icon="plus"></span>Add team member</button></div>
+    <div class="wrap"><table>
+      <thead><tr><th>Username</th><th>Role</th><th></th></tr></thead>
+      <tbody>${state.team.map(m => `<tr>
+        <td class="strong">${esc(m.username)}${m.username === me ? ' <span class="muted" style="font-weight:400">(you)</span>' : ''}</td>
+        <td><span class="pill ${m.role === 'admin' ? 'done' : ''}">${m.role === 'admin' ? 'Admin' : 'Worker'}</span></td>
+        <td class="num">${m.username === me ? '' : `<button class="btn sm" data-remove-member="${esc(m._id)}">Remove</button>`}</td>
+      </tr>`).join('')}</tbody></table></div>`;
+  $('#add').onclick = openTeamForm;
+  $('#view').onclick = async e => {
+    const rm = e.target.closest('[data-remove-member]');
+    if (!rm) return;
+    const m = state.team.find(x => x._id === rm.dataset.removeMember);
+    if (!m || !confirm(`Remove ${m.username}? They will no longer be able to log in.`)) return;
+    try {
+      await api(`/team/${encodeURIComponent(m._id)}`, 'DELETE');
+      state.team = state.team.filter(x => x._id !== m._id);
+      toast(`${m.username} removed`);
+      renderTeam();
+    } catch (err) { toast(err.message); }
+  };
+  paintIcons($('#view'));
+}
+function openTeamForm() {
+  const fields = `
+    <div class="field"><label for="username">Username</label><input id="username" name="username" autocomplete="off" required></div>
+    <div class="field"><label for="password">Password (min 6 characters)</label><input id="password" name="password" type="text" autocomplete="off" minlength="6" required></div>
+    <div class="field"><label for="role">Role</label>
+      <select id="role" name="role"><option value="worker">Worker — stage, status &amp; photos only</option><option value="admin">Admin — full access</option></select></div>`;
+  openForm('Add team member', fields, 'Add member', async d => {
+    const r = await api('/team', 'POST', d);
+    state.team.push(r.member);
+    toast(`${r.member.username} added`);
+    renderTeam();
+  });
+}
+
+/* ================= QUOTATIONS (admin only) ================= */
+const QUOTE_STATUSES = ['Draft', 'Sent', 'Accepted', 'Rejected'];
+function quoteName(q) { return (q.ProspectName || clientName(q.Client)) || 'Unknown'; }
+function quotePill(status) {
+  const cls = status === 'Accepted' ? 'done' : status === 'Rejected' ? 'late' : status === 'Converted' ? 'type-new' : '';
+  return `<span class="pill ${cls}">${esc(status)}</span>`;
+}
+async function viewQuotes() {
+  $('#view').innerHTML = `
+    <div class="head"><div><h1 class="title">Quotations</h1><p>Quote a job, then convert it into an order once it's accepted.</p></div></div>
+    <div class="empty" style="margin-top:12px"><p>Loading…</p></div>`;
+  try {
+    state.quotes = await api('/quotes');
+    renderQuotes();
+  } catch (err) {
+    $('#view').innerHTML += `<div class="card empty"><p>${esc(err.message)}</p></div>`;
+  }
+}
+function renderQuotes() {
+  const rows = state.quotes;
+  $('#view').innerHTML = `
+    <div class="head"><div><h1 class="title">Quotations</h1><p>${rows.length} on record</p></div>
+      <button class="btn primary" id="add"><span data-icon="plus"></span>New quotation</button></div>
+    ${rows.length ? `<div class="wrap"><table>
+      <thead><tr><th>Quote</th><th>For</th><th class="num">Amount</th><th>Valid until</th><th>Status</th><th></th></tr></thead>
+      <tbody>${rows.map(q => `<tr>
+        <td class="strong">${esc(q.QuoteID)}</td>
+        <td>${esc(quoteName(q))}</td>
+        <td class="num">${money(q.Amount)}</td>
+        <td>${q.ValidUntil ? fmtDate(q.ValidUntil) : '<span class="muted">—</span>'}</td>
+        <td>${quotePill(q.Status)}</td>
+        <td class="num"><button class="btn sm" data-quote-actions="${esc(q._id)}">Actions</button></td>
+      </tr>`).join('')}</tbody></table></div>`
+      : '<div class="wrap"><div class="empty"><p>No quotations yet. Create one to send to a prospect or client.</p></div></div>'}`;
+  $('#add').onclick = () => openQuoteForm();
+  $('#view').onclick = e => { const b = e.target.closest('[data-quote-actions]'); if (b) openQuoteActions(b.dataset.quoteActions); };
+  paintIcons($('#view'));
+}
+
+function openQuoteForm(existing) {
+  const isEdit = !!existing;
+  const fields = `
+    ${isEdit ? '' : `<div class="field"><label for="Client">Client</label>
+      <select id="Client" name="Client">
+        <option value="">— New prospect (not a client yet) —</option>
+        ${state.clients.map(c => `<option value="${esc(c._id)}">${esc(c.name)} (${esc(c.Phone)})</option>`).join('')}
+      </select></div>
+    <div class="two" id="prospectFields">
+      <div class="field"><label for="ProspectName">Prospect name</label><input id="ProspectName" name="ProspectName"></div>
+      <div class="field"><label for="ProspectPhone">Phone</label><input id="ProspectPhone" name="ProspectPhone"></div>
+    </div>`}
+    <div class="field"><label for="Description">What's being quoted</label><input id="Description" name="Description" value="${isEdit ? esc(existing.Description || '') : ''}" required></div>
+    <div class="two">
+      <div class="field"><label for="Amount">Amount (₹)</label><input id="Amount" name="Amount" type="number" min="0" step="any" inputmode="decimal" value="${isEdit ? existing.Amount : ''}" required></div>
+      <div class="field"><label for="ValidUntil">Valid until</label><input id="ValidUntil" name="ValidUntil" type="date" value="${isEdit ? esc(existing.ValidUntil || '') : addDays(14)}"></div>
+    </div>`;
+  openForm(isEdit ? `Edit ${existing.QuoteID}` : 'New quotation', fields, isEdit ? 'Save changes' : 'Create quotation', async d => {
+    if (isEdit) {
+      const r = await api(`/quotes/${encodeURIComponent(existing._id)}`, 'PATCH', d);
+      toast(`${existing.QuoteID} updated`);
+      const i = state.quotes.findIndex(x => x._id === r.quote._id);
+      if (i > -1) state.quotes[i] = r.quote;
+    } else {
+      if (!d.Client && !d.ProspectName) throw new Error("Pick a client or enter a prospect's name.");
+      const r = await api('/quotes', 'POST', d);
+      toast(`Quotation ${r.quote.QuoteID} created`);
+      state.quotes.unshift(r.quote);
+    }
+    renderQuotes();
+  }, isEdit ? null : () => {
+    const sel = $('#Client'), pf = $('#prospectFields');
+    const upd = () => pf.style.display = sel.value ? 'none' : '';
+    sel.onchange = upd; upd();
+  });
+}
+
+function openQuoteActions(id) {
+  const q = state.quotes.find(x => x._id === id);
+  if (!q) return;
+  const dlg = $('#dlg');
+  const converted = q.Status === 'Converted';
+  dlg.innerHTML = `<h2>${esc(q.QuoteID)}</h2>
+    <p class="muted" style="margin-top:-14px;margin-bottom:18px">${esc(quoteName(q))} · ${money(q.Amount)}</p>
+    ${!converted ? `<div class="field"><label for="qStatus">Status</label>
+      <select id="qStatus">${QUOTE_STATUSES.map(s => `<option value="${s}" ${q.Status === s ? 'selected' : ''}>${s}</option>`).join('')}</select></div>` : ''}
+    <div class="sheet" style="margin-top:4px">
+      <button type="button" class="sheet-item" id="printBtn">Print / share quotation</button>
+      ${!converted ? `<button type="button" class="sheet-item" id="editBtn">Edit quotation</button>
+      <button type="button" class="sheet-item" id="convBtn">Convert to order</button>` : ''}
+      <button type="button" class="sheet-item danger" id="delBtn">Delete quotation</button>
+    </div>
+    <div class="actions"><button type="button" class="btn" id="cancel">Close</button></div>`;
+  $('#cancel').onclick = () => dlg.close();
+  $('#printBtn').onclick = () => { dlg.close(); printQuote(q); };
+  $('#delBtn').onclick = () => { dlg.close(); deleteQuote(q); };
+  const editBtn = $('#editBtn'); if (editBtn) editBtn.onclick = () => { dlg.close(); openQuoteForm(q); };
+  const convBtn = $('#convBtn'); if (convBtn) convBtn.onclick = () => { dlg.close(); convertQuote(q); };
+  const statusSel = $('#qStatus');
+  if (statusSel) statusSel.onchange = async e => {
+    const val = e.target.value;
+    if (val === q.Status) return;
+    try {
+      const r = await api(`/quotes/${encodeURIComponent(q._id)}`, 'PATCH', { Status: val });
+      const i = state.quotes.findIndex(x => x._id === r.quote._id);
+      if (i > -1) state.quotes[i] = r.quote;
+      toast(`${q.QuoteID} marked ${val}`);
+      dlg.close();
+      renderQuotes();
+    } catch (err) { toast(err.message); e.target.value = q.Status; }
+  };
+  dlg.showModal();
+}
+
+function convertQuote(q) {
+  if (q.Client) {
+    if (!confirm(`Create a new order for ${esc(quoteName(q))} worth ${money(q.Amount)}?`)) return;
+    doConvertQuote(q, q.Client);
+    return;
+  }
+  // No linked client yet (it was a prospect) — pick or require one first.
+  const fields = `<p class="muted" style="margin-top:0">This quotation was for a prospect, not yet a client. Pick who this order is for.</p>
+    <div class="field"><label for="Client">Client</label>
+      <select id="Client" name="Client" required>${state.clients.map(c => `<option value="${esc(c._id)}">${esc(c.name)} (${esc(c.Phone)})</option>`).join('')}</select></div>`;
+  if (!state.clients.length) { toast('Add a client first, then convert this quotation'); return; }
+  openForm(`Convert ${q.QuoteID}`, fields, 'Create order', async d => {
+    await doConvertQuote(q, d.Client);
+  });
+}
+async function doConvertQuote(q, clientId) {
+  try {
+    const r = await api(`/quotes/${encodeURIComponent(q._id)}/convert`, 'POST', { Client: clientId });
+    const i = state.quotes.findIndex(x => x._id === r.quote._id);
+    if (i > -1) state.quotes[i] = r.quote;
+    state.orders.unshift(r.order);
+    toast(`${r.order.OrderID} created from ${q.QuoteID}`);
+    renderQuotes();
+  } catch (err) { toast(err.message); }
+}
+
+function deleteQuote(q) {
+  if (!confirm(`Delete quotation ${q.QuoteID}? This cannot be undone.`)) return;
+  api(`/quotes/${encodeURIComponent(q._id)}`, 'DELETE')
+    .then(() => { state.quotes = state.quotes.filter(x => x._id !== q._id); toast(`${q.QuoteID} deleted`); renderQuotes(); })
+    .catch(err => toast(err.message));
+}
+
+function printQuote(q) {
+  const html = `
+    <div class="inv">
+      <div class="inv-head">
+        <div><h1>Primova</h1><p>Prime Solutions. Real Results.</p></div>
+        <div class="inv-meta"><h2>Quotation</h2><p>${esc(q.QuoteID)}</p><p>${fmtDate(q.CreatedAt)}</p></div>
+      </div>
+      <div class="inv-parties">
+        <div><b>Prepared for</b><p>${esc(quoteName(q))}</p>${q.ProspectPhone ? `<p>${esc(q.ProspectPhone)}</p>` : ''}</div>
+        <div><b>Valid until</b><p>${q.ValidUntil ? fmtDate(q.ValidUntil) : 'Not specified'}</p></div>
+      </div>
+      <table class="inv-table">
+        <thead><tr><th>Description</th><th class="num">Amount</th></tr></thead>
+        <tbody><tr><td>${esc(q.Description)}</td><td class="num">${money(q.Amount)}</td></tr></tbody>
+        <tfoot><tr class="strong"><td>Total quoted</td><td class="num">${money(q.Amount)}</td></tr></tfoot>
+      </table>
+      <p class="inv-status">This is a quotation, not a bill. Prices may change after this date.</p>
+      <p class="inv-foot">Thank you for considering Primova</p>
+    </div>`;
+  $('#invoicePrint').innerHTML = html;
+  setTimeout(() => window.print(), 50);
 }
 
 /* ---------- shared dialog ---------- */
@@ -1285,7 +1892,7 @@ paintIcons(); logoInto();
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
 }
-if (sessionStorage.getItem('admin')) showApp();
+if (authToken) showApp();
 else { $('#auth').hidden = false; setAuthMode('login'); }
 </script>
 </body>
