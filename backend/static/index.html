@@ -190,6 +190,7 @@
   .pill { display: inline-block; font-size: 12px; font-weight: 500; padding: 3px 10px; border-radius: 99px; background: var(--green-soft); color: var(--green); white-space: nowrap; }
   .pill.done { background: var(--black); color: #fff; }
   .pill.late { background: var(--danger-soft); color: var(--danger); }
+  .pill.pending { background: #fdf2e3; color: #a15c07; }
   .pill.type-new { background: var(--green-soft); color: var(--green-dark); }
   .pill.type-labour { background: #eaf0fb; color: #2451b3; }
   .pill.type-repair { background: #fdf2e3; color: #a15c07; }
@@ -352,12 +353,6 @@
   .inv-table tfoot tr.strong td { font-weight: 700; font-size: 15px; border-top: 2px solid #111; padding-top: 10px; }
   .inv-status { font-size: 12px; color: #555; margin: 0 0 4px; }
   .inv-foot { font-size: 12px; color: #777; margin-top: 24px; text-align: center; }
-  .jc-top { display: flex; justify-content: space-between; gap: 20px; align-items: flex-start; }
-  .jc-info p { margin: 0 0 6px; font-size: 14px; }
-  .jc-qr { text-align: center; font-size: 11px; color: #555; flex: none; }
-  .jc-qr svg { display: block; margin-bottom: 4px; }
-  .jc-list { list-style: none; padding: 0; margin: 0 0 14px; }
-  .jc-list li { padding: 7px 0; border-bottom: 1px solid #ddd; font-size: 14px; }
   @media print {
     @page { margin: 16mm; }
     body > *:not(.print-only) { display: none !important; }
@@ -402,6 +397,7 @@
       <button data-view="orders"><span data-icon="orders"></span>Orders</button>
       <button data-view="clients"><span data-icon="clients"></span>Clients</button>
       <button data-view="products"><span data-icon="products"></span>Products</button>
+      <button data-view="employees" data-admin-only><span data-icon="employees"></span>Employees</button>
       <button data-view="quotes" data-admin-only><span data-icon="quotes"></span>Quotations</button>
       <button data-view="trash" data-admin-only><span data-icon="trash"></span>Recently deleted</button>
       <button data-view="team" data-admin-only><span data-icon="clients"></span>Team</button>
@@ -443,7 +439,8 @@ const ICONS = {
   trend: '<path d="M3 17l6-6 4 4 8-8"/><path d="M15 7h6v6"/>',
   download: '<path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M4 19h16"/>',
   trash: '<path d="M4 7h16"/><path d="M9 7V4h6v3"/><path d="M6 7l1 13h10l1-13"/><path d="M10 11v6"/><path d="M14 11v6"/>',
-  quotes: '<path d="M6 3h9l5 5v13a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z"/><path d="M15 3v5h5"/><path d="M8 13h8"/><path d="M8 17h5"/>'
+  quotes: '<path d="M6 3h9l5 5v13a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z"/><path d="M15 3v5h5"/><path d="M8 13h8"/><path d="M8 17h5"/>',
+  employees: '<circle cx="12" cy="8" r="3.4"/><path d="M5 20c0-4 3-6.5 7-6.5s7 2.5 7 6.5"/>'
 };
 const icon = n => `<svg class="i" viewBox="0 0 24 24" aria-hidden="true">${ICONS[n]}</svg>`;
 function paintIcons(root = document) { root.querySelectorAll('[data-icon]').forEach(el => { el.innerHTML = icon(el.dataset.icon); el.style.display = 'grid'; }); }
@@ -524,35 +521,33 @@ async function api(path, method = 'GET', body) {
 }
 
 /* ---------- state ---------- */
-const state = { view: 'dashboard', role: 'admin', orders: [], clients: [], products: [], deletedOrders: [], deletedClients: [], team: [], quotes: [], filter: 'All', q: '' };
+const state = { view: 'dashboard', role: 'admin', orders: [], clients: [], products: [], deletedOrders: [], deletedClients: [], team: [], quotes: [], employees: [], attendance: [], attMonth: today().slice(0, 7), filter: 'All', q: '' };
 const clientName = id => (state.clients.find(c => c._id === id) || {}).name || 'Unknown client';
 const productName = id => (state.products.find(p => p._id === id) || {}).name || '';
 const orderProfit = o => (o.TotalValue || 0) - (o.PurchaseCost || 0) - sum(o.Expenses || [], 'amount');
-const statusPill = s => `<span class="pill ${s === 'Completed' ? 'done' : ''}">${esc(s)}</span>`;
-
-/* Order types drive which stage roadmap and which extra fields apply. */
-const ORDER_TYPES = ['New Order', 'Labour Job', 'Repairing', 'Trading'];
-const STAGE_SETS = {
-  'New Order': ['Buying raw material', 'Processing raw material', 'Completion of order', 'Delivery of order'],
-  'Labour Job': ['Raw material received', 'Processing / job work', 'Completion of order', 'Delivery of order'],
-  'Repairing': ['Machine received', 'Diagnosis / repair in progress', 'Repair completed', 'Delivered to client'],
-  'Trading': ['Item purchased', 'Ready for delivery', 'Delivered to client']
+const STATUSES = ['Active', 'Payment Due', 'Closed'];
+const statusPill = s => {
+  const cls = s === 'Closed' ? 'done' : s === 'Payment Due' ? 'pending' : '';
+  return `<span class="pill ${cls}">${esc(s)}</span>`;
 };
+
+/* v1: one shared 6-step roadmap for every order type (used to vary by type). */
+const ORDER_TYPES = ['New Order', 'Labour Job', 'Repairing', 'Trading'];
+const STAGES = ['Raw material', 'Processing', 'Completion of order', 'To be delivered', 'Delivered', 'Money received'];
 const TYPE_SHORT = { 'New Order': 'New', 'Labour Job': 'Labour', 'Repairing': 'Repair', 'Trading': 'Trading' };
 const typePill = t => `<span class="pill type-${(TYPE_SHORT[t] || 'New').toLowerCase()}">${esc(TYPE_SHORT[t] || 'New')}</span>`;
 const orderTitle = o => o.OrderName && o.OrderName !== o.OrderID ? o.OrderName : o.OrderID;
-function stageDots(stage, type) {
-  const stages = STAGE_SETS[type] || STAGE_SETS['New Order'];
-  stage = Math.min(stage || 1, stages.length);
-  const n = stages.length;
+function stageDots(stage) {
+  const n = STAGES.length;
+  stage = Math.min(stage || 1, n);
   const parts = Array.from({ length: n }, (_, idx) => {
     const i = idx + 1;
     const dot = `<span class="dot${i <= stage ? ' on' : ''}"></span>`;
     const ln = idx < n - 1 ? `<span class="ln${i < stage ? ' on' : ''}"></span>` : '';
     return dot + ln;
   }).join('');
-  return `<div class="cellc" title="${esc(stages[stage - 1])} (step ${stage} of ${n})">
-    <div class="stage-dots">${parts}</div><span class="stage-label">${esc(stages[stage - 1])}</span></div>`;
+  return `<div class="cellc" title="${esc(STAGES[stage - 1])} (step ${stage} of ${n})">
+    <div class="stage-dots">${parts}</div><span class="stage-label">${esc(STAGES[stage - 1])}</span></div>`;
 }
 
 /* ---------- derived data (always computed fresh from state.orders,
@@ -667,7 +662,7 @@ async function loadAll() {
 }
 
 /* ---------- nav ---------- */
-const ADMIN_ONLY_VIEWS = ['trash', 'team', 'quotes'];
+const ADMIN_ONLY_VIEWS = ['trash', 'team', 'quotes', 'employees'];
 function go(view) {
   if (ADMIN_ONLY_VIEWS.includes(view) && state.role !== 'admin') view = 'dashboard';
   state.view = view; state.q = ''; state.filter = 'All';
@@ -690,7 +685,7 @@ function render() {
   document.querySelectorAll('#nav button').forEach(b => {
     if (b.dataset.view === state.view) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
   });
-  ({ dashboard: viewDashboard, orders: viewOrders, clients: viewClients, products: viewProducts, trash: viewTrash, team: viewTeam, quotes: viewQuotes })[state.view]();
+  ({ dashboard: viewDashboard, orders: viewOrders, clients: viewClients, products: viewProducts, trash: viewTrash, team: viewTeam, quotes: viewQuotes, employees: viewEmployees })[state.view]();
   paintIcons($('#view'));
   const v = $('#view');
   v.classList.remove('view-enter'); void v.offsetWidth; v.classList.add('view-enter');
@@ -848,7 +843,7 @@ function viewOrders() {
       <button class="btn primary" id="add"><span data-icon="plus"></span>New order</button>` : ''}</div></div>
     <div class="toolbar">
       <input type="search" id="q" placeholder="Search by order name, ID or client" aria-label="Search orders" value="${esc(state.q)}">
-      <div class="seg" id="seg">${(isAdmin ? ['All', 'Active', 'Completed', 'Due', 'Unassigned'] : ['My jobs', 'All', 'Active', 'Completed']).map(f => `<button data-f="${f}" aria-pressed="${state.filter === f}">${f}</button>`).join('')}</div>
+      <div class="seg" id="seg">${(isAdmin ? ['All', 'Active', 'Payment Due', 'Closed', 'Due', 'Unassigned'] : ['My jobs', 'All', 'Active', 'Payment Due', 'Closed']).map(f => `<button data-f="${f}" aria-pressed="${state.filter === f}">${f}</button>`).join('')}</div>
     </div>
     <div id="list"></div>`;
   const addBtn = $('#add'); if (addBtn) addBtn.onclick = openOrderForm;
@@ -926,15 +921,29 @@ function toCSV(rows, headers) {
   rows.forEach(r => lines.push(headers.map(h => csvEscape(h.get(r))).join(',')));
   return lines.join('\r\n');
 }
-function downloadCSV(content, filename) {
+async function downloadCSV(content, filename) {
   const blob = new Blob(['\ufeff' + content], { type: 'text/csv;charset=utf-8;' });
+  // On phones — especially the installed Android app's WebView — a plain
+  // blob-download link often finishes with nowhere visible to find the
+  // file. The native share sheet (Save to Files, Drive, email, WhatsApp…)
+  // is far more reliable there, so prefer it when available.
+  if (navigator.canShare && navigator.share) {
+    try {
+      const file = new File([blob], filename, { type: 'text/csv' });
+      if (navigator.canShare({ files: [file] })) {
+        await navigator.share({ files: [file], title: filename });
+        return 'shared';
+      }
+    } catch (e) { if (e && e.name === 'AbortError') return 'cancelled'; }
+  }
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url; a.download = filename;
   document.body.appendChild(a); a.click(); document.body.removeChild(a);
   setTimeout(() => URL.revokeObjectURL(url), 1000);
+  return 'downloaded';
 }
-function exportOrdersCSV(rows) {
+async function exportOrdersCSV(rows) {
   if (!rows.length) { toast('No orders to export'); return; }
   const headers = [
     { label: 'Order ID', get: o => o.OrderID },
@@ -954,12 +963,14 @@ function exportOrdersCSV(rows) {
     { label: 'Expenses', get: o => sum(o.Expenses || [], 'amount') || '' },
     { label: 'Profit', get: o => orderProfit(o) },
     { label: 'Status', get: o => o.Status },
-    { label: 'Stage', get: o => { const s = STAGE_SETS[o.OrderType] || STAGE_SETS['New Order']; return `${o.Stage || 1} of ${s.length} — ${s[(o.Stage || 1) - 1]}`; } }
+    { label: 'Stage', get: o => `${o.Stage || 1} of ${STAGES.length} — ${STAGES[(o.Stage || 1) - 1]}` }
   ];
-  downloadCSV(toCSV(rows, headers), `orders-${today()}.csv`);
-  toast(`Exported ${rows.length} order${rows.length === 1 ? '' : 's'}`);
+  const result = await downloadCSV(toCSV(rows, headers), `orders-${today()}.csv`);
+  const n = `${rows.length} order${rows.length === 1 ? '' : 's'}`;
+  if (result === 'shared') toast(`${n} shared`);
+  else if (result === 'downloaded') toast(`${n} exported — check your device's Downloads if you don't see it`);
 }
-function exportClientsCSV(rows) {
+async function exportClientsCSV(rows) {
   if (!rows.length) { toast('No clients to export'); return; }
   const headers = [
     { label: 'Name', get: c => c.name },
@@ -969,8 +980,10 @@ function exportClientsCSV(rows) {
     { label: 'Active orders', get: c => clientStats(c._id).ActiveOrders },
     { label: 'Balance due', get: c => clientStats(c._id).BalanceDue }
   ];
-  downloadCSV(toCSV(rows, headers), `clients-${today()}.csv`);
-  toast(`Exported ${rows.length} client${rows.length === 1 ? '' : 's'}`);
+  const result = await downloadCSV(toCSV(rows, headers), `clients-${today()}.csv`);
+  const n = `${rows.length} client${rows.length === 1 ? '' : 's'}`;
+  if (result === 'shared') toast(`${n} shared`);
+  else if (result === 'downloaded') toast(`${n} exported — check your device's Downloads if you don't see it`);
 }
 
 function printStatement(c) {
@@ -1001,39 +1014,6 @@ function printStatement(c) {
   setTimeout(() => window.print(), 50);
 }
 
-function printInvoice(o) {
-  const c = state.clients.find(x => x._id === o.Client) || {};
-  const isInvoice = o.RemainingPayment > 0;
-  const html = `
-    <div class="inv">
-      <div class="inv-head">
-        <div><h1>Primova</h1><p>Prime Solutions. Real Results.</p></div>
-        <div class="inv-meta"><h2>${isInvoice ? 'Invoice' : 'Receipt'}</h2>
-          <p>${esc(o.OrderID)}</p><p>${fmtDate(o.ReceivingDate)}</p></div>
-      </div>
-      <div class="inv-parties">
-        <div><b>Billed to</b><p>${esc(c.name || 'Unknown client')}</p>${c.Add ? `<p>${esc(c.Add)}</p>` : ''}${c.Phone ? `<p>${esc(c.Phone)}</p>` : ''}</div>
-        <div><b>Order</b><p>${esc(orderTitle(o))}</p><p>${esc(o.OrderType)}</p></div>
-      </div>
-      <table class="inv-table">
-        <thead><tr><th>Description</th><th class="num">Amount</th></tr></thead>
-        <tbody>
-          <tr><td>${esc(itemLabel(o.OrderType))}${o.ItemDetails ? ': ' + esc(o.ItemDetails) : ''}</td><td class="num">${money(o.TotalValue)}</td></tr>
-          ${o.OrderType === 'Repairing' && o.EstimatedCost > 0 ? `<tr><td class="muted">Estimated cost (quoted before work)</td><td class="num muted">${money(o.EstimatedCost)}</td></tr>` : ''}
-        </tbody>
-        <tfoot>
-          <tr><td>Total</td><td class="num">${money(o.TotalValue)}</td></tr>
-          <tr><td>Advance / paid</td><td class="num">${money(o.Advance)}</td></tr>
-          <tr class="strong"><td>${isInvoice ? 'Balance due' : 'Balance'}</td><td class="num">${money(o.RemainingPayment)}</td></tr>
-        </tfoot>
-      </table>
-      <p class="inv-status">Status: ${esc(o.Status)}${o.DeliveryDate ? ` · Delivery: ${fmtDate(o.DeliveryDate)}` : ''}</p>
-      <p class="inv-foot">Thank you for your business — Primova</p>
-    </div>`;
-  $('#invoicePrint').innerHTML = html;
-  setTimeout(() => window.print(), 50);
-}
-
 function teamOptions(selectedId) {
   return `<option value="">— Unassigned —</option>` + state.team.map(m =>
     `<option value="${esc(m._id)}" ${selectedId === m._id ? 'selected' : ''}>${esc(m.username)} (${m.role === 'admin' ? 'admin' : 'worker'})</option>`).join('');
@@ -1043,80 +1023,22 @@ function teamOptions(selectedId) {
 function sendStageUpdate(o) {
   const c = state.clients.find(x => x._id === o.Client);
   if (!c) { toast('Client not found'); return; }
-  const stages = STAGE_SETS[o.OrderType] || STAGE_SETS['New Order'];
-  const st = Math.min(o.Stage || 1, stages.length);
-  const msg = `Hi ${c.name}, an update on your order ${orderTitle(o)}: it is now at "${stages[st - 1]}" (step ${st} of ${stages.length}).${o.DeliveryDate ? ` Expected delivery: ${fmtDate(o.DeliveryDate)}.` : ''} Thank you! — Primova`;
+  const st = Math.min(o.Stage || 1, STAGES.length);
+  const msg = `Hi ${c.name}, an update on your order ${orderTitle(o)}: it is now at "${STAGES[st - 1]}" (step ${st} of ${STAGES.length}).${o.DeliveryDate ? ` Expected delivery: ${fmtDate(o.DeliveryDate)}.` : ''} Thank you! — Primova`;
   window.open(waLink(c.Phone, msg), '_blank');
 }
 function offerClientUpdate(o) {
   const c = state.clients.find(x => x._id === o.Client);
   if (!c) return;
-  const stages = STAGE_SETS[o.OrderType] || STAGE_SETS['New Order'];
-  const st = Math.min(o.Stage || 1, stages.length);
+  const st = Math.min(o.Stage || 1, STAGES.length);
   const dlg = $('#dlg');
   dlg.innerHTML = `<h2>Tell ${esc(c.name)}?</h2>
-    <p class="muted" style="margin-top:0">${esc(orderTitle(o))} is now at “${esc(stages[st - 1])}”. Send them a quick WhatsApp update.</p>
+    <p class="muted" style="margin-top:0">${esc(orderTitle(o))} is now at “${esc(STAGES[st - 1])}”. Send them a quick WhatsApp update.</p>
     <div class="actions"><button type="button" class="btn" id="cancel">Not now</button>
       <button type="button" class="btn primary" id="sendUpd">Send on WhatsApp</button></div>`;
   $('#cancel').onclick = () => dlg.close();
   $('#sendUpd').onclick = () => { dlg.close(); sendStageUpdate(o); };
   dlg.showModal();
-}
-
-/* ---- job card with a QR code that opens the order when scanned ---- */
-let qrPromise = null;
-function loadQR() {
-  if (window.qrcode) return Promise.resolve();
-  if (!qrPromise) {
-    const sources = ['https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js', 'https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js'];
-    qrPromise = new Promise((resolve, reject) => {
-      const tryNext = i => {
-        if (i >= sources.length) { qrPromise = null; reject(new Error('qr')); return; }
-        const sc = document.createElement('script');
-        sc.src = sources[i];
-        sc.onload = () => window.qrcode ? resolve() : tryNext(i + 1);
-        sc.onerror = () => tryNext(i + 1);
-        document.head.appendChild(sc);
-      };
-      tryNext(0);
-    });
-  }
-  return qrPromise;
-}
-async function printJobCard(o) {
-  try { await loadQR(); } catch { toast('The QR code needs an internet connection the first time.'); return; }
-  const c = state.clients.find(x => x._id === o.Client) || {};
-  const stages = STAGE_SETS[o.OrderType] || STAGE_SETS['New Order'];
-  const st = Math.min(o.Stage || 1, stages.length);
-  const qr = window.qrcode(0, 'M');
-  qr.addData(`${location.origin}/#order=${o._id}`);
-  qr.make();
-  const n = qr.getModuleCount(), quiet = 2;
-  let path = '';
-  for (let r = 0; r < n; r++) for (let col = 0; col < n; col++) if (qr.isDark(r, col)) path += `M${col},${r}h1v1h-1z`;
-  const svg = `<svg viewBox="${-quiet} ${-quiet} ${n + quiet * 2} ${n + quiet * 2}" width="150" height="150" shape-rendering="crispEdges"><rect x="${-quiet}" y="${-quiet}" width="${n + quiet * 2}" height="${n + quiet * 2}" fill="#fff"/><path d="${path}" fill="#000"/></svg>`;
-  $('#invoicePrint').innerHTML = `
-    <div class="inv">
-      <div class="inv-head">
-        <div><h1>Job card</h1><p>${esc(o.OrderID)} · ${esc(o.OrderType)}</p></div>
-        <div class="inv-meta"><h2>Primova</h2><p>Prime Solutions. Real Results.</p></div>
-      </div>
-      <div class="jc-top">
-        <div class="jc-info">
-          <h2 style="margin:0 0 10px;font-size:20px">${esc(orderTitle(o))}</h2>
-          <p><b>Client:</b> ${esc(c.name || 'Unknown client')}</p>
-          ${o.ItemDetails ? `<p><b>${esc(itemLabel(o.OrderType))}:</b> ${esc(o.ItemDetails)}</p>` : ''}
-          <p><b>${esc(receivingLabel(o.OrderType))}:</b> ${fmtDate(o.ReceivingDate)}</p>
-          <p><b>${esc(deliveryLabel(o.OrderType))}:</b> ${fmtDate(o.DeliveryDate)}</p>
-          ${o.AssignedName ? `<p><b>Assigned to:</b> ${esc(o.AssignedName)}</p>` : ''}
-        </div>
-        <div class="jc-qr">${svg}<div>Scan to open this order</div></div>
-      </div>
-      <h3 style="margin:22px 0 6px;font-size:14px">Progress</h3>
-      <ul class="jc-list">${stages.map((l, i) => `<li>${i + 1 <= st ? '☑' : '☐'} ${i + 1}. ${esc(l)}</li>`).join('')}</ul>
-      <p class="inv-foot">Notes: ______________________________________________</p>
-    </div>`;
-  setTimeout(() => window.print(), 50);
 }
 
 function openOrderExpenses(o) {
@@ -1224,24 +1146,21 @@ function openOrderActions(id) {
   const isAdmin = state.role === 'admin';
   const o = state.orders.find(x => x._id === id);
   if (!o) return;
-  const stages = STAGE_SETS[o.OrderType] || STAGE_SETS['New Order'];
   const dlg = $('#dlg');
   dlg.innerHTML = `<h2>${esc(orderTitle(o))}</h2>
     <p class="muted" style="margin-top:-14px;margin-bottom:18px">${esc(o.OrderID)} · ${esc(o.OrderType)}${o.Product ? ` · ${esc(productName(o.Product))}` : ''}${o.AssignedName ? ` · ${esc(o.AssignedName)}` : ''}</p>
     <div class="two">
       <div class="field"><label for="ordStatus">Status</label>
-        <select id="ordStatus">${['Active', 'Completed'].map(s => `<option value="${s}" ${o.Status === s ? 'selected' : ''}>${s}</option>`).join('')}</select></div>
+        <select id="ordStatus">${STATUSES.map(s => `<option value="${s}" ${o.Status === s ? 'selected' : ''}>${s}</option>`).join('')}</select></div>
       <div class="field"><label for="ordStage">Stage</label>
-        <select id="ordStage">${stages.map((label, i) => `<option value="${i + 1}" ${o.Stage === i + 1 ? 'selected' : ''}>${i + 1}. ${esc(label)}</option>`).join('')}</select></div>
+        <select id="ordStage">${STAGES.map((label, i) => `<option value="${i + 1}" ${o.Stage === i + 1 ? 'selected' : ''}>${i + 1}. ${esc(label)}</option>`).join('')}</select></div>
     </div>
     ${isAdmin ? `<div class="field"><label for="ordAssign">Assigned to</label><select id="ordAssign">${teamOptions(o.AssignedTo)}</select></div>` : ''}
     <div class="sheet" style="margin-top:4px">
       <button type="button" class="sheet-item" id="updBtn">Send update to client (WhatsApp)</button>
-      <button type="button" class="sheet-item" id="cardBtn">Job card with QR (print)</button>
       <button type="button" class="sheet-item" id="photosBtn">Photos${o.Photos && o.Photos.length ? ` (${o.Photos.length})` : ''}</button>
       ${isAdmin ? `<button type="button" class="sheet-item" id="editBtn">Edit order details</button>
       <button type="button" class="sheet-item" id="expBtn">Expenses & profit (${money(orderProfit(o))})</button>
-      <button type="button" class="sheet-item" id="invBtn">${o.RemainingPayment > 0 ? 'Invoice' : 'Receipt'} (print / save PDF)</button>
       ${o.RemainingPayment > 0 ? `<button type="button" class="sheet-item" id="advBtn">Add advance payment</button>` : ''}
       ${o.RemainingPayment > 0 ? `<button type="button" class="sheet-item" id="remindBtn">Send payment reminder (WhatsApp)</button>` : ''}
       <button type="button" class="sheet-item" id="histBtn">View order history</button>
@@ -1251,7 +1170,6 @@ function openOrderActions(id) {
   $('#cancel').onclick = () => dlg.close();
   $('#photosBtn').onclick = () => { dlg.close(); openOrderPhotos(o); };
   $('#updBtn').onclick = () => { dlg.close(); sendStageUpdate(o); };
-  $('#cardBtn').onclick = () => { dlg.close(); printJobCard(o); };
   const assignSel = $('#ordAssign');
   if (assignSel) assignSel.onchange = async e => {
     try {
@@ -1262,7 +1180,6 @@ function openOrderActions(id) {
     } catch (err) { toast(err.message); e.target.value = o.AssignedTo || ''; }
   };
   const editBtn = $('#editBtn'); if (editBtn) editBtn.onclick = () => { dlg.close(); editOrderForm(o); };
-  const invBtn = $('#invBtn'); if (invBtn) invBtn.onclick = () => { dlg.close(); printInvoice(o); };
   const expBtn = $('#expBtn'); if (expBtn) expBtn.onclick = () => { dlg.close(); openOrderExpenses(o); };
   const advBtn = $('#advBtn'); if (advBtn) advBtn.onclick = () => { dlg.close(); addAdvanceForm(o); };
   const remindBtn = $('#remindBtn'); if (remindBtn) remindBtn.onclick = () => { dlg.close(); remindOrder(o); };
@@ -1271,16 +1188,18 @@ function openOrderActions(id) {
 
   // Dropdowns apply immediately on change — no separate submit step, and
   // only the affected order is patched into local state (no full reload).
+  // Status and Stage both stay freely editable at any time, even after
+  // Closed — nothing here ever locks.
   $('#ordStatus').onchange = async e => {
     const val = e.target.value;
     if (val === o.Status) return;
     let markPaid = false;
-    if (val === 'Completed' && o.RemainingPayment > 0) {
-      markPaid = confirm(`${clientName(o.Client)} still owes ${money(o.RemainingPayment)}. Mark it as received too?`);
+    if (val === 'Closed' && o.RemainingPayment > 0) {
+      markPaid = confirm(`${clientName(o.Client)} still owes ${money(o.RemainingPayment)}. Mark it as received too? (If not, this will be marked "Payment Due" instead of Closed.)`);
     }
     try {
       const r = await api(`/orders/${encodeURIComponent(o._id)}/status`, 'PATCH', { Status: val, markPaid });
-      toast(val === 'Completed' ? `${orderTitle(o)} marked completed` : `${orderTitle(o)} reopened`);
+      toast(`${orderTitle(o)} is now ${r.order.Status}`);
       dlg.close();
       patchOrder(r.order);
     } catch (err) { toast(err.message); e.target.value = o.Status; }
@@ -1290,10 +1209,10 @@ function openOrderActions(id) {
     if (step === o.Stage) return;
     try {
       const r = await api(`/orders/${encodeURIComponent(o._id)}/stage`, 'PATCH', { Stage: step });
-      toast(`${orderTitle(o)} moved to "${stages[step - 1]}"`);
+      toast(`${orderTitle(o)} moved to "${STAGES[step - 1]}"${r.order.Status !== o.Status ? ` · now ${r.order.Status}` : ''}`);
       dlg.close();
       patchOrder(r.order);
-      if (step >= stages.length - 1) offerClientUpdate(r.order);
+      if (step >= STAGES.length - 1 && step < STAGES.length) offerClientUpdate(r.order);
     } catch (err) { toast(err.message); e.target.value = o.Stage; }
   };
   dlg.showModal();
@@ -1355,16 +1274,19 @@ function deleteOrder(o) {
 }
 
 function openOrderForm() {
-  if (!state.clients.length) {
-    toast('Add a client before creating an order');
-    go('clients'); return;
-  }
   const fields = `
     <div class="field"><label for="OrderType">Order type</label>
       <select id="OrderType" name="OrderType">${ORDER_TYPES.map(t => `<option value="${esc(t)}">${esc(t)}</option>`).join('')}</select></div>
     <div class="field"><label for="OrderName">Order name (optional)</label><input id="OrderName" name="OrderName" placeholder="e.g. Gate hinges — Sharma Steel"></div>
-    <div class="field"><label for="Client">Client</label>
-      <select id="Client" name="Client" required>${state.clients.map(c => `<option value="${esc(c._id)}">${esc(c.name)} (${esc(c.Phone)})</option>`).join('')}</select></div>
+    <div class="field">
+      <label for="Client">Client</label>
+      <select id="Client" name="Client" ${state.clients.length ? 'required' : 'disabled hidden'}>
+        <option value="">— Select a client —</option>
+        ${state.clients.map(c => `<option value="${esc(c._id)}">${esc(c.name)}${c.Phone ? ` (${esc(c.Phone)})` : ''}</option>`).join('')}
+      </select>
+      <input id="NewClientName" placeholder="New client's name" ${state.clients.length ? 'hidden' : ''}>
+      <button type="button" class="link" id="toggleNewClient" style="margin-top:6px;display:inline-block">${state.clients.length ? '+ Add a new client' : '← Choose an existing client instead'}</button>
+    </div>
     ${state.role === 'admin' && state.team.length ? `<div class="field"><label for="AssignedTo">Assign to (optional)</label>
       <select id="AssignedTo" name="AssignedTo">${teamOptions('')}</select></div>` : ''}
     ${state.products.length ? `<div class="field"><label for="Product">Product (optional)</label>
@@ -1387,15 +1309,31 @@ function openOrderForm() {
     </div>
     <p class="calc">Remaining payment: <strong id="remain">₹0</strong></p>`;
   openForm('New order', fields, 'Create order', async d => {
+    let clientId = d.Client;
+    if (!clientId) {
+      const newName = ($('#NewClientName').value || '').trim();
+      if (!newName) throw new Error('Pick an existing client, or enter a name for a new one.');
+      const r0 = await api('/newclient', 'POST', { name: newName, Add: '', Phone: '' });
+      state.clients.push(r0.client);
+      clientId = r0.client._id;
+    }
     const total = +d.TotalValue, adv = +d.Advance;
     if (adv > total) throw new Error('Advance cannot be more than the total value.');
     if (d.DeliveryDate < d.ReceivingDate) throw new Error('Delivery date cannot be before the receiving date.');
-    const r = await api('/neworder', 'POST', { ...d, TotalValue: total, Advance: adv, EstimatedCost: +d.EstimatedCost || 0, PurchaseCost: +d.PurchaseCost || 0 });
+    const r = await api('/neworder', 'POST', { ...d, Client: clientId, TotalValue: total, Advance: adv, EstimatedCost: +d.EstimatedCost || 0, PurchaseCost: +d.PurchaseCost || 0 });
     toast(`Order ${r.order.OrderID} created`);
     patchOrder(r.order);
   }, () => {
     const upd = () => { $('#remain').textContent = money((+$('#TotalValue').value || 0) - (+$('#Advance').value || 0)); };
     $('#TotalValue').oninput = upd; $('#Advance').oninput = upd;
+    const clientSel = $('#Client'), newNameInput = $('#NewClientName'), toggleBtn = $('#toggleNewClient');
+    toggleBtn.onclick = () => {
+      const addingNew = clientSel.hidden;
+      clientSel.hidden = addingNew; clientSel.disabled = addingNew;
+      newNameInput.hidden = !addingNew;
+      toggleBtn.textContent = addingNew ? '← Choose an existing client instead' : '+ Add a new client';
+      if (addingNew) newNameInput.focus(); else clientSel.focus();
+    };
     const applyType = () => {
       const t = $('#OrderType').value;
       $('#itemLbl').textContent = itemLabel(t);
@@ -1457,12 +1395,12 @@ function clientsList() {
       const stats = clientStats(c._id);
       const os = clientOrders(c._id);
       return `<details class="row"><summary class="grid">
-        <span class="cellc"><span class="av sm">${initial(c.name)}</span><span class="strong">${esc(c.name)}</span></span>
-        <span>${esc(c.Phone)}</span><span>${stats.TotalOrders}</span><span>${stats.ActiveOrders}</span>${isAdmin ? `<span class="num strong">${money(stats.BalanceDue)}</span>` : ''}
+        <span class="cellc"><span class="av sm">${initial(c.name)}</span><span class="strong">${esc(c.name)}</span>${(!c.Phone || !c.Add) ? '<span class="pill pending" style="margin-left:6px">Incomplete</span>' : ''}</span>
+        <span>${c.Phone ? esc(c.Phone) : '<span class="muted">—</span>'}</span><span>${stats.TotalOrders}</span><span>${stats.ActiveOrders}</span>${isAdmin ? `<span class="num strong">${money(stats.BalanceDue)}</span>` : ''}
       </summary>
       <div class="detail">
         <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:12px">
-          <p class="addr" style="margin:0">${esc(c.Add)}</p>
+          <p class="addr" style="margin:0">${c.Add ? esc(c.Add) : '<span class="muted">No address yet — tap Edit to add one</span>'}</p>
           ${isAdmin ? `<div style="display:flex;gap:8px;flex:none;flex-wrap:wrap;justify-content:flex-end">
             ${os.length ? `<button class="btn sm" data-statement-client="${esc(c._id)}">Statement</button>` : ''}
             ${stats.BalanceDue > 0 ? `<button class="btn sm" data-remind-client="${esc(c._id)}">Remind</button>` : ''}
@@ -1495,8 +1433,8 @@ function editClientForm(id) {
   if (!c) return;
   const fields = `
     <div class="field"><label for="name">Name</label><input id="name" name="name" value="${esc(c.name)}" required></div>
-    <div class="field"><label for="Phone">Phone</label><input id="Phone" name="Phone" inputmode="numeric" maxlength="10" pattern="\\d{10}" title="10 digits" value="${esc(c.Phone)}" required></div>
-    <div class="field"><label for="Add">Address</label><input id="Add" name="Add" value="${esc(c.Add)}" required></div>`;
+    <div class="field"><label for="Phone">Phone</label><input id="Phone" name="Phone" inputmode="numeric" maxlength="10" pattern="\\d{10}" title="10 digits" value="${esc(c.Phone)}"></div>
+    <div class="field"><label for="Add">Address</label><input id="Add" name="Add" value="${esc(c.Add)}"></div>`;
   openForm(`Edit ${c.name}`, fields, 'Save changes', async d => {
     const r = await api(`/clients/${encodeURIComponent(c._id)}`, 'PATCH', d);
     toast('Client updated');
@@ -1559,12 +1497,14 @@ async function viewTrash() {
     <div class="head"><div><h1 class="title">Recently deleted</h1><p>Restore an order or client, or remove it for good.</p></div></div>
     <div class="empty" style="margin-top:12px"><p>Loading…</p></div>`;
   try {
-    const [delOrders, delClients] = await Promise.all([
+    const [delOrders, delClients, delEmployees] = await Promise.all([
       api('/orders/deleted'),
-      api('/clients/deleted')
+      api('/clients/deleted'),
+      api('/employees/deleted')
     ]);
     state.deletedOrders = delOrders;
     state.deletedClients = delClients;
+    state.deletedEmployees = delEmployees;
     renderTrash();
   } catch (err) {
     $('#view').innerHTML += `<div class="card empty"><p>${esc(err.message)}</p></div>`;
@@ -1599,13 +1539,25 @@ function renderTrash() {
           <button class="btn sm" data-restore-client="${esc(c._id)}">Restore</button>
           <button class="btn sm" data-purge-client="${esc(c._id)}">Delete forever</button>
         </td></tr>`).join('')}</tbody></table></div>`
-      : '<div class="wrap"><div class="empty"><p>No deleted clients.</p></div></div>'}`;
+      : '<div class="wrap"><div class="empty"><p>No deleted clients.</p></div></div>'}
+    <h3 class="section-title">Deleted employees (${(state.deletedEmployees || []).length})</h3>
+    ${(state.deletedEmployees || []).length ? `<div class="wrap"><table>
+      <thead><tr><th>Name</th><th>Role</th><th>Deleted</th><th></th></tr></thead>
+      <tbody>${state.deletedEmployees.map(emp => `<tr>
+        <td class="strong">${esc(emp.name)}</td><td>${emp.Role ? esc(emp.Role) : '<span class="muted">—</span>'}</td><td>${fmtDate(emp.DeletedAt)}</td>
+        <td class="num" style="white-space:nowrap">
+          <button class="btn sm" data-restore-employee="${esc(emp._id)}">Restore</button>
+          <button class="btn sm" data-purge-employee="${esc(emp._id)}">Delete forever</button>
+        </td></tr>`).join('')}</tbody></table></div>`
+      : '<div class="wrap"><div class="empty"><p>No deleted employees.</p></div></div>'}`;
 
   $('#view').onclick = async e => {
     const ro = e.target.closest('[data-restore-order]');
     const po = e.target.closest('[data-purge-order]');
     const rc = e.target.closest('[data-restore-client]');
     const pc = e.target.closest('[data-purge-client]');
+    const re = e.target.closest('[data-restore-employee]');
+    const pe = e.target.closest('[data-purge-employee]');
 
     if (ro) {
       try {
@@ -1637,6 +1589,21 @@ function renderTrash() {
         await api(`/clients/${encodeURIComponent(pc.dataset.purgeClient)}/forever`, 'DELETE');
         state.deletedClients = state.deletedClients.filter(x => x._id !== pc.dataset.purgeClient);
         toast('Client permanently deleted');
+        renderTrash();
+      } catch (err) { toast(err.message); }
+    } else if (re) {
+      try {
+        const r = await api(`/employees/${encodeURIComponent(re.dataset.restoreEmployee)}/restore`, 'POST');
+        state.deletedEmployees = state.deletedEmployees.filter(x => x._id !== r.employee._id);
+        toast(`${r.employee.name} restored`);
+        renderTrash();
+      } catch (err) { toast(err.message); }
+    } else if (pe) {
+      if (!confirm('Permanently delete this employee? This cannot be undone.')) return;
+      try {
+        await api(`/employees/${encodeURIComponent(pe.dataset.purgeEmployee)}/forever`, 'DELETE');
+        state.deletedEmployees = state.deletedEmployees.filter(x => x._id !== pe.dataset.purgeEmployee);
+        toast('Employee permanently deleted');
         renderTrash();
       } catch (err) { toast(err.message); }
     }
@@ -1695,6 +1662,229 @@ function openTeamForm() {
     toast(`${r.member.username} added`);
     renderTeam();
   });
+}
+
+/* ================= EMPLOYEES (admin only) ================= */
+const ATT_STATUSES = ['Present', 'Absent', 'Half Day', 'Leave'];
+const ATT_SHORT = { 'Present': 'P', 'Absent': 'A', 'Half Day': 'H', 'Leave': 'L' };
+function monthLabel(ym) {
+  const [y, m] = ym.split('-').map(Number);
+  return new Date(y, m - 1, 1).toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });
+}
+function salaryLabel(emp) { return emp.SalaryType === 'Daily' ? `${money(emp.SalaryAmount)}/day` : `${money(emp.SalaryAmount)}/month`; }
+// Salary math (gross, per-day deduction for Absent/Half Day, net, due) is
+// computed server-side so the list, the attendance tab, and the payment
+// form never disagree. This just looks up what the server last computed.
+const summaryFor = id => (state.salarySummary || []).find(s => s.EmployeeId === id);
+function daysInMonthClient(ym) { const [y, m] = ym.split('-').map(Number); return new Date(y, m, 0).getDate(); }
+async function ensureSalarySummary(ym) {
+  if (state.salarySummaryMonth === ym && state.salarySummary) return;
+  try {
+    state.salarySummary = await api(`/employees/summary?month=${encodeURIComponent(ym)}`);
+    state.salarySummaryMonth = ym;
+  } catch (err) { toast(err.message); state.salarySummary = []; }
+}
+async function ensureSalarySummaryForce(ym) { state.salarySummaryMonth = null; await ensureSalarySummary(ym); }
+
+async function viewEmployees() {
+  state.empTab = state.empTab || 'list';
+  $('#view').innerHTML = `
+    <div class="head"><div><h1 class="title">Employees</h1><p>Loading…</p></div></div>`;
+  try {
+    state.employees = await api('/employees');
+    if (state.empTab === 'attendance') await loadAttendanceMonth(state.attMonth);
+    else await ensureSalarySummary(today().slice(0, 7));
+    renderEmployees();
+  } catch (err) {
+    $('#view').innerHTML += `<div class="card empty"><p>${esc(err.message)}</p></div>`;
+  }
+}
+async function loadAttendanceMonth(ym) {
+  state.attMonth = ym;
+  try {
+    const [recs] = await Promise.all([
+      api(`/attendance?month=${encodeURIComponent(ym)}`),
+      ensureSalarySummary(ym)
+    ]);
+    state.attendance = recs;
+  } catch (err) { toast(err.message); state.attendance = []; }
+}
+function renderEmployees() {
+  const activeEmps = state.employees.filter(e => e.Active !== false);
+  $('#view').innerHTML = `
+    <div class="head"><div><h1 class="title">Employees</h1><p>${state.employees.length} on record, ${activeEmps.length} active</p></div>
+      ${state.empTab === 'list' ? `<button class="btn primary" id="add"><span data-icon="plus"></span>New employee</button>` : ''}</div>
+    <div class="seg" id="empSeg">${['list', 'attendance'].map(t => `<button data-t="${t}" aria-pressed="${state.empTab === t}">${t === 'list' ? 'Employees' : 'Attendance'}</button>`).join('')}</div>
+    <div id="empBody" style="margin-top:16px"></div>`;
+  $('#empSeg').onclick = e => {
+    const b = e.target.closest('button'); if (!b || b.dataset.t === state.empTab) return;
+    state.empTab = b.dataset.t;
+    const ready = state.empTab === 'attendance' ? loadAttendanceMonth(state.attMonth) : ensureSalarySummary(today().slice(0, 7));
+    ready.then(renderEmployees);
+  };
+  const addBtn = $('#add'); if (addBtn) addBtn.onclick = () => openEmployeeForm();
+  if (state.empTab === 'list') renderEmployeeList(); else renderAttendance();
+  paintIcons($('#view'));
+}
+
+function renderEmployeeList() {
+  const ym = today().slice(0, 7);
+  const rows = state.employees;
+  $('#empBody').innerHTML = rows.length ? `<div class="wrap"><table>
+    <thead><tr><th>Employee</th><th>Role</th><th>Phone</th><th class="num">Salary</th><th class="num">Deduction</th><th class="num">Paid (${monthLabel(ym)})</th><th class="num">Due</th><th>Status</th><th></th></tr></thead>
+    <tbody>${rows.map(e => {
+      const s = summaryFor(e._id);
+      return `<tr>
+      <td class="strong">${esc(e.name)}<br><span class="muted" style="font-weight:400;font-size:12px">${esc(e.EmployeeID)}</span></td>
+      <td>${e.Role ? esc(e.Role) : '<span class="muted">—</span>'}</td>
+      <td>${e.Phone ? esc(e.Phone) : '<span class="muted">—</span>'}</td>
+      <td class="num">${salaryLabel(e)}</td>
+      <td class="num">${s && s.deduction ? `<span class="muted">−${money(s.deduction)}</span>` : '<span class="muted">—</span>'}</td>
+      <td class="num">${money(s ? s.paid : 0)}</td>
+      <td class="num">${s ? money(s.due) : '<span class="muted">—</span>'}</td>
+      <td>${e.Active === false ? '<span class="pill late">Inactive</span>' : '<span class="pill">Active</span>'}</td>
+      <td class="num"><button class="btn sm" data-emp-actions="${esc(e._id)}">Actions</button></td>
+    </tr>`;
+    }).join('')}</tbody></table></div>`
+    : '<div class="wrap"><div class="empty"><p>No employees yet. Add your first one.</p></div></div>';
+  $('#empBody').onclick = e => { const b = e.target.closest('[data-emp-actions]'); if (b) openEmployeeActions(b.dataset.empActions); };
+}
+
+function renderAttendance() {
+  const activeEmps = state.employees.filter(e => e.Active !== false);
+  const date = state.attDate || today();
+  const ym = date.slice(0, 7);
+  if (ym !== state.attMonth) { loadAttendanceMonth(ym).then(renderAttendance); return; }
+  const byDate = id => (state.attendance.find(a => a.Employee === id && a.Date === date) || {}).Status;
+  $('#empBody').innerHTML = `
+    <div class="field" style="max-width:220px"><label for="attDate">Date</label><input id="attDate" type="date" value="${esc(date)}" max="${today()}"></div>
+    <h3 class="section-title">Mark attendance — ${fmtDate(date)}</h3>
+    ${activeEmps.length ? `<div class="wrap"><table>
+      <thead><tr><th>Employee</th><th>Role</th><th colspan="4">Status</th></tr></thead>
+      <tbody>${activeEmps.map(e => {
+        const current = byDate(e._id);
+        return `<tr><td class="strong">${esc(e.name)}</td><td>${e.Role ? esc(e.Role) : '<span class="muted">—</span>'}</td>
+          ${ATT_STATUSES.map(s => `<td class="num"><button type="button" class="btn sm${current === s ? ' primary' : ''}" data-mark="${esc(e._id)}" data-status="${s}">${ATT_SHORT[s]}</button></td>`).join('')}
+        </tr>`;
+      }).join('')}</tbody></table></div>` : '<div class="wrap"><div class="empty"><p>No active employees to mark.</p></div></div>'}
+    <h3 class="section-title">Monthly summary & salary — ${monthLabel(ym)}</h3>
+    <p class="muted" style="margin-top:-6px">Per day = salary ÷ ${daysInMonthClient(ym)} days this month. Absent deducts a full day, Half Day deducts half. Leave is paid.</p>
+    ${activeEmps.length ? `<div class="wrap"><table>
+      <thead><tr><th>Employee</th>${ATT_STATUSES.map(s => `<th class="num">${s}</th>`).join('')}<th class="num">Deduction</th><th class="num">Net salary</th><th class="num">Due</th></tr></thead>
+      <tbody>${activeEmps.map(e => {
+        const recs = state.attendance.filter(a => a.Employee === e._id);
+        const counts = Object.fromEntries(ATT_STATUSES.map(s => [s, recs.filter(r => r.Status === s).length]));
+        const s = summaryFor(e._id);
+        return `<tr><td class="strong">${esc(e.name)}</td>${ATT_STATUSES.map(st => `<td class="num">${counts[st]}</td>`).join('')}
+          <td class="num">${s && s.deduction ? `−${money(s.deduction)}` : '<span class="muted">—</span>'}</td>
+          <td class="num">${s ? money(s.netSalary) : '<span class="muted">—</span>'}</td>
+          <td class="num">${s ? money(s.due) : '<span class="muted">—</span>'}</td></tr>`;
+      }).join('')}</tbody></table></div>` : ''}`;
+  $('#attDate').onchange = e => { state.attDate = e.target.value; renderAttendance(); };
+  $('#empBody').onclick = async e => {
+    const b = e.target.closest('[data-mark]'); if (!b) return;
+    const empId = b.dataset.mark, status = b.dataset.status;
+    try {
+      const r = await api('/attendance', 'POST', { Employee: empId, Date: date, Status: status });
+      const i = state.attendance.findIndex(a => a.Employee === empId && a.Date === date);
+      if (i > -1) state.attendance[i] = r.record; else state.attendance.push(r.record);
+      await ensureSalarySummaryForce(ym);
+      renderAttendance();
+    } catch (err) { toast(err.message); }
+  };
+}
+
+function openEmployeeForm(existing) {
+  const isEdit = !!existing;
+  const fields = `
+    <div class="field"><label for="name">Name</label><input id="name" name="name" value="${isEdit ? esc(existing.name) : ''}" required></div>
+    <div class="two">
+      <div class="field"><label for="Role">Role / designation</label><input id="Role" name="Role" placeholder="e.g. Machine Operator" value="${isEdit ? esc(existing.Role || '') : ''}"></div>
+      <div class="field"><label for="Phone">Phone</label><input id="Phone" name="Phone" inputmode="numeric" maxlength="10" value="${isEdit ? esc(existing.Phone || '') : ''}"></div>
+    </div>
+    <div class="two">
+      <div class="field"><label for="SalaryType">Salary type</label>
+        <select id="SalaryType" name="SalaryType"><option value="Monthly" ${isEdit && existing.SalaryType === 'Monthly' ? 'selected' : ''}>Monthly</option><option value="Daily" ${isEdit && existing.SalaryType === 'Daily' ? 'selected' : ''}>Daily wage</option></select></div>
+      <div class="field"><label for="SalaryAmount">Amount (₹)</label><input id="SalaryAmount" name="SalaryAmount" type="number" min="0" step="any" inputmode="decimal" value="${isEdit ? existing.SalaryAmount : ''}" required></div>
+    </div>
+    <div class="field"><label for="JoiningDate">Joining date</label><input id="JoiningDate" name="JoiningDate" type="date" value="${isEdit ? esc(existing.JoiningDate || '') : today()}"></div>`;
+  openForm(isEdit ? `Edit ${existing.name}` : 'New employee', fields, isEdit ? 'Save changes' : 'Add employee', async d => {
+    if (isEdit) {
+      const r = await api(`/employees/${encodeURIComponent(existing._id)}`, 'PATCH', d);
+      toast(`${r.employee.name} updated`);
+      const i = state.employees.findIndex(x => x._id === r.employee._id);
+      if (i > -1) state.employees[i] = r.employee;
+    } else {
+      const r = await api('/employees', 'POST', d);
+      toast(`${r.employee.name} added`);
+      state.employees.push(r.employee);
+    }
+    renderEmployees();
+  });
+}
+
+function openEmployeeActions(id) {
+  const emp = state.employees.find(x => x._id === id);
+  if (!emp) return;
+  const s = summaryFor(id);
+  const dlg = $('#dlg');
+  dlg.innerHTML = `<h2>${esc(emp.name)}</h2>
+    <p class="muted" style="margin-top:-14px;margin-bottom:18px">${esc(emp.EmployeeID)}${emp.Role ? ` · ${esc(emp.Role)}` : ''} · ${salaryLabel(emp)}${s ? ` · Due ${money(s.due)}` : ''}</p>
+    <div class="sheet" style="margin-top:4px">
+      <button type="button" class="sheet-item" id="editBtn">Edit details</button>
+      ${!s || s.due > 0 ? `<button type="button" class="sheet-item" id="paySalaryBtn">Record salary payment</button>` : ''}
+      <button type="button" class="sheet-item" id="toggleActiveBtn">${emp.Active === false ? 'Mark active' : 'Mark inactive'}</button>
+      <button type="button" class="sheet-item danger" id="delBtn">Delete employee</button>
+    </div>
+    <div class="actions"><button type="button" class="btn" id="cancel">Close</button></div>`;
+  $('#cancel').onclick = () => dlg.close();
+  $('#editBtn').onclick = () => { dlg.close(); openEmployeeForm(emp); };
+  const payBtn = $('#paySalaryBtn'); if (payBtn) payBtn.onclick = () => { dlg.close(); openSalaryForm(emp); };
+  $('#toggleActiveBtn').onclick = async () => {
+    try {
+      const r = await api(`/employees/${encodeURIComponent(emp._id)}`, 'PATCH', { Active: emp.Active === false });
+      const i = state.employees.findIndex(x => x._id === r.employee._id);
+      if (i > -1) state.employees[i] = r.employee;
+      toast(`${r.employee.name} marked ${r.employee.Active === false ? 'inactive' : 'active'}`);
+      dlg.close();
+      renderEmployees();
+    } catch (err) { toast(err.message); }
+  };
+  $('#delBtn').onclick = () => { dlg.close(); deleteEmployee(emp); };
+  dlg.showModal();
+}
+
+function openSalaryForm(emp) {
+  const ym = today().slice(0, 7);
+  const s = summaryFor(emp._id);
+  const fields = `
+    <p class="calc" style="margin-top:0">${salaryLabel(emp)}${s ? ` · Net for ${monthLabel(ym)}: ${money(s.netSalary)}${s.deduction ? ` (after −${money(s.deduction)} deduction)` : ''} · Due: <strong>${money(s.due)}</strong>` : ''}</p>
+    <div class="two">
+      <div class="field"><label for="forMonth">For month</label><input id="forMonth" name="forMonth" type="month" value="${ym}" required></div>
+      <div class="field"><label for="amount">Amount (₹)</label><input id="amount" name="amount" type="number" min="0" step="any" inputmode="decimal" value="${s && s.due > 0 ? s.due : ''}" required></div>
+    </div>
+    <div class="two">
+      <div class="field"><label for="mode">Mode</label>
+        <select id="mode" name="mode"><option>Cash</option><option>UPI</option><option>Bank transfer</option><option>Cheque</option></select></div>
+      <div class="field"><label for="date">Date</label><input id="date" name="date" type="date" value="${today()}" required></div>
+    </div>`;
+  openForm(`Salary — ${emp.name}`, fields, 'Record payment', async d => {
+    const amt = +d.amount;
+    if (!amt || amt <= 0) throw new Error('Enter a valid amount.');
+    const r = await api(`/employees/${encodeURIComponent(emp._id)}/salary`, 'POST', d);
+    await ensureSalarySummaryForce(state.empTab === 'attendance' ? state.attMonth : today().slice(0, 7));
+    toast(`${money(amt)} recorded for ${emp.name}`);
+    const i = state.employees.findIndex(x => x._id === r.employee._id);
+    if (i > -1) state.employees[i] = r.employee;
+    renderEmployees();
+  });
+}
+
+function deleteEmployee(emp) {
+  if (!confirm(`Delete ${emp.name}? This can be undone from Recently Deleted.`)) return;
+  api(`/employees/${encodeURIComponent(emp._id)}`, 'DELETE')
+    .then(() => { state.employees = state.employees.filter(x => x._id !== emp._id); toast(`${emp.name} deleted`); renderEmployees(); })
+    .catch(err => toast(err.message));
 }
 
 /* ================= QUOTATIONS (admin only) ================= */

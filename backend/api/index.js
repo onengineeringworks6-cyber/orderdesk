@@ -322,12 +322,12 @@ const orders = mongoose.model("Orders", {
 
   Status: {
     type: String,
-    enum: ["Active", "Completed"],
+    enum: ["Active", "Payment Due", "Closed"],
     default: "Active"
   },
 
   // Production/delivery roadmap step. Meaning depends on OrderType —
-  // see STAGE_SETS on the frontend and STAGE_COUNTS below. Max step
+  // see STAGES below — the 6-step roadmap is shared by every order type.
   // varies by type (Trading only has 3 steps), enforced in the
   // /orders/:id/stage route rather than a fixed schema enum.
   Stage: {
@@ -381,16 +381,31 @@ const orders = mongoose.model("Orders", {
   }
 });
 
-// Stage roadmap labels per order type — also used to write readable
-// history entries when a stage changes. Keep in sync with STAGE_SETS
+// One shared 6-step roadmap for every order type (v1 change — used to vary
+// by type, now unified at the user's request). Keep in sync with STAGES
 // on the frontend.
-const STAGE_LABELS = {
-  "New Order": ["Buying raw material", "Processing raw material", "Completion of order", "Delivery of order"],
-  "Labour Job": ["Raw material received", "Processing / job work", "Completion of order", "Delivery of order"],
-  "Repairing": ["Machine received", "Diagnosis / repair in progress", "Repair completed", "Delivered to client"],
-  "Trading": ["Item purchased", "Ready for delivery", "Delivered to client"]
-};
-const STAGE_COUNTS = Object.fromEntries(Object.entries(STAGE_LABELS).map(([k, v]) => [k, v.length]));
+const STAGES = ["Raw material", "Processing", "Completion of order", "To be delivered", "Delivered", "Money received"];
+
+// Moves an order to its closed-out state: Closed if fully paid, otherwise
+// "Payment Due" so unpaid work never silently disappears into Closed.
+// markPaidIfDue only applies when explicitly requested (the "mark as paid"
+// checkbox) — reaching the last stage on its own never fabricates a payment.
+function applyClose(order, markPaidIfDue) {
+  if (order.RemainingPayment > 0 && markPaidIfDue) {
+    const paid = order.RemainingPayment;
+    const nowDate = new Date().toISOString();
+    order.Advance += paid;
+    order.RemainingPayment = 0;
+    order.AdvanceHistory.push({ amount: paid, mode: "Marked as paid", date: nowDate.slice(0, 10) });
+  }
+  if (order.RemainingPayment > 0) {
+    order.Status = "Payment Due";
+    return "Production complete — payment still due, marked Payment Due";
+  }
+  order.Status = "Closed";
+  order.Stage = STAGES.length;
+  return "Order closed — all stages complete and payment received";
+}
 
 app.post("/neworder", requireAdmin, async (req, res) => {
   try {
@@ -428,7 +443,8 @@ app.post("/neworder", requireAdmin, async (req, res) => {
       return res.status(400).json({ message: "Advance cannot be more than the total value" });
     }
 
-    const type = STAGE_COUNTS[OrderType] ? OrderType : "New Order";
+    const VALID_ORDER_TYPES = ["New Order", "Labour Job", "Repairing", "Trading"];
+    const type = VALID_ORDER_TYPES.includes(OrderType) ? OrderType : "New Order";
 
     // Count existing orders
     const yearPrefix = `ORD-${new Date().getFullYear()}-`;
@@ -657,8 +673,8 @@ app.patch('/orders/:id/status', async (req, res) => {
   try {
     const { Status, markPaid } = req.body;
 
-    if (!["Active", "Completed"].includes(Status)) {
-      return res.status(400).json({ message: "Status must be Active or Completed" });
+    if (!["Active", "Payment Due", "Closed"].includes(Status)) {
+      return res.status(400).json({ message: "Status must be Active, Payment Due, or Closed" });
     }
 
     const order = await orders.findById(req.params.id);
@@ -666,17 +682,17 @@ app.patch('/orders/:id/status', async (req, res) => {
       return res.status(404).json({ message: "Order not found" });
     }
 
-    order.Status = Status;
-    let detail = Status === "Completed" ? "Marked completed" : "Reopened";
-    if (Status === "Completed" && markPaid && req.user.role === "admin" && order.RemainingPayment > 0) {
-      // Record it as an actual payment so Advance + Remaining still equals
-      // the total (otherwise a later edit would bring the balance back).
-      const paid = order.RemainingPayment;
-      const nowDate = new Date().toISOString();
-      order.Advance += paid;
-      order.RemainingPayment = 0;
-      order.AdvanceHistory.push({ amount: paid, mode: "Marked as paid", date: nowDate.slice(0, 10) });
-      detail += ` · remaining ₹${paid} marked as paid`;
+    let detail;
+    if (Status === "Closed") {
+      // Closing is conditional on payment: applyClose downgrades to
+      // "Payment Due" by itself if the balance isn't actually zero.
+      detail = applyClose(order, markPaid && req.user.role === "admin");
+    } else if (Status === "Payment Due") {
+      order.Status = "Payment Due";
+      detail = "Marked Payment Due";
+    } else {
+      order.Status = "Active";
+      detail = "Reopened";
     }
     order.History.push({ event: "Status", detail, date: new Date().toISOString() });
 
@@ -766,7 +782,7 @@ app.delete('/orders/:id/expenses/:expenseId', requireAdmin, async (req, res) => 
 });
 
 // UPDATE ORDER STAGE — the number of valid steps depends on OrderType
-// (see STAGE_COUNTS above / STAGE_SETS on the frontend).
+// (see STAGES above).
 app.patch('/orders/:id/stage', async (req, res) => {
   try {
     const order = await orders.findById(req.params.id);
@@ -775,15 +791,21 @@ app.patch('/orders/:id/stage', async (req, res) => {
     }
 
     const step = Number(req.body.Stage);
-    const maxStage = STAGE_COUNTS[order.OrderType] || 4;
+    const maxStage = STAGES.length;
 
     if (!Number.isInteger(step) || step < 1 || step > maxStage) {
-      return res.status(400).json({ message: `Stage must be between 1 and ${maxStage} for a ${order.OrderType}` });
+      return res.status(400).json({ message: `Stage must be between 1 and ${maxStage}` });
     }
 
     order.Stage = step;
-    const labels = STAGE_LABELS[order.OrderType] || STAGE_LABELS["New Order"];
-    order.History.push({ event: "Stage", detail: `Moved to step ${step} of ${maxStage}: ${labels[step - 1]}`, date: new Date().toISOString() });
+    let detail = `Moved to step ${step} of ${maxStage}: ${STAGES[step - 1]}`;
+    // Reaching the last stage ("Money received") closes the order out by
+    // default — Closed if paid, Payment Due if not. Never fabricates a
+    // payment on its own; that only happens via the explicit checkbox.
+    if (step === maxStage && order.Status !== "Closed") {
+      detail += ` · ${applyClose(order, false)}`;
+    }
+    order.History.push({ event: "Stage", detail, date: new Date().toISOString() });
     await order.save();
 
     res.status(200).json({ message: "Stage updated", order: forRole(req, order) });
@@ -851,15 +873,17 @@ const client = mongoose.model("Client", {
     trim: true
   },
 
+  // Optional so a client can be quick-added by name alone from the New
+  // Order form, then filled in properly later from the Clients page.
   Add: {
     type: String,
-    required: true,
+    default: "",
     trim: true
   },
 
   Phone: {
     type: String,
-    required: true,
+    default: "",
     trim: true
   },
 
@@ -880,33 +904,35 @@ app.post("/newclient", requireAdmin, async (req, res) => {
 
     const { name, Add, Phone } = req.body;
 
-    // Required fields
-    if (!name || !Add || !Phone) {
+    if (!name || !name.trim()) {
       return res.status(400).json({
-        message: "Name, address and phone are required"
+        message: "Name is required"
       });
     }
 
-    // Basic phone validation
-    if (!/^\d{10}$/.test(Phone)) {
-      return res.status(400).json({
-        message: "Phone number must be 10 digits"
-      });
-    }
+    const phone = (Phone || "").trim();
 
-    // Check duplicate phone
-    const existingClient = await client.findOne({ Phone });
-
-    if (existingClient) {
-      return res.status(409).json({
-        message: "Client with this phone number already exists"
-      });
+    // Phone and address are optional — a client can be quick-added by name
+    // alone and completed later. But if a phone IS given, it still has to
+    // be valid and unique.
+    if (phone) {
+      if (!/^\d{10}$/.test(phone)) {
+        return res.status(400).json({
+          message: "Phone number must be 10 digits"
+        });
+      }
+      const existingClient = await client.findOne({ Phone: phone });
+      if (existingClient) {
+        return res.status(409).json({
+          message: "Client with this phone number already exists"
+        });
+      }
     }
 
     const newClient = new client({
-      name,
-      Add,
-      Phone
+      name: name.trim(),
+      Add: (Add || "").trim(),
+      Phone: phone
     });
 
     await newClient.save();
@@ -931,21 +957,24 @@ app.patch("/clients/:id", requireAdmin, async (req, res) => {
   try {
     const { name, Add, Phone } = req.body;
 
-    if (!name || !Add || !Phone) {
-      return res.status(400).json({ message: "Name, address and phone are required" });
-    }
-    if (!/^\d{10}$/.test(Phone)) {
-      return res.status(400).json({ message: "Phone number must be 10 digits" });
+    if (!name || !name.trim()) {
+      return res.status(400).json({ message: "Name is required" });
     }
 
-    const duplicate = await client.findOne({ Phone, _id: { $ne: req.params.id } });
-    if (duplicate) {
-      return res.status(409).json({ message: "Another client already uses this phone number" });
+    const phone = (Phone || "").trim();
+    if (phone) {
+      if (!/^\d{10}$/.test(phone)) {
+        return res.status(400).json({ message: "Phone number must be 10 digits" });
+      }
+      const duplicate = await client.findOne({ Phone: phone, _id: { $ne: req.params.id } });
+      if (duplicate) {
+        return res.status(409).json({ message: "Another client already uses this phone number" });
+      }
     }
 
     const updated = await client.findByIdAndUpdate(
       req.params.id,
-      { name, Add, Phone },
+      { name: name.trim(), Add: (Add || "").trim(), Phone: phone },
       { new: true }
     );
 
@@ -1362,6 +1391,299 @@ app.post("/quotes/:id/convert", requireAdmin, async (req, res) => {
     res.status(201).json({ message: "Quotation converted to order", order: newOrder, quote: q });
   } catch (error) {
     res.status(500).json({ message: "Error converting quotation", error: error.message });
+  }
+});
+
+//..........................EMPLOYEES (admin only)......................
+// Separate from Team (app login accounts) — an employee is a person on the
+// floor who may or may not ever log into Order Desk. Attendance and salary
+// are tracked here regardless of whether they have an account.
+const employee = mongoose.model("Employee", {
+  EmployeeID: { type: String, required: true, unique: true },
+  name: { type: String, required: true, trim: true },
+  Phone: { type: String, default: "", trim: true },
+  Role: { type: String, default: "", trim: true }, // job title / designation, e.g. "Machine Operator"
+  JoiningDate: { type: String, default: "" },
+  SalaryType: { type: String, enum: ["Monthly", "Daily"], default: "Monthly" },
+  SalaryAmount: { type: Number, default: 0 }, // monthly amount, or per-day rate if Daily
+  Active: { type: Boolean, default: true }, // false = no longer working here, but history is kept
+  Payments: [{ forMonth: String, amount: Number, mode: String, date: String }],
+  Deleted: { type: Boolean, default: false },
+  DeletedAt: { type: String, default: null }
+});
+
+// One attendance record per employee per day.
+const attendance = mongoose.model("Attendance", {
+  Employee: { type: mongoose.Schema.Types.ObjectId, ref: "Employee", required: true },
+  Date: { type: String, required: true }, // YYYY-MM-DD
+  Status: { type: String, enum: ["Present", "Absent", "Half Day", "Leave"], default: "Present" }
+});
+
+app.get("/employees", requireAdmin, async (req, res) => {
+  try {
+    const list = await employee.find({ Deleted: { $ne: true } }).sort({ name: 1 });
+    res.status(200).json(list);
+  } catch (error) {
+    res.status(500).json({ message: "Error fetching employees", error: error.message });
+  }
+});
+
+app.get("/employees/deleted", requireAdmin, async (req, res) => {
+  try {
+    const list = await employee.find({ Deleted: true }).sort({ DeletedAt: -1 });
+    res.status(200).json(list);
+  } catch (error) {
+    res.status(500).json({ message: "Error fetching deleted employees", error: error.message });
+  }
+});
+
+app.post("/employees", requireAdmin, async (req, res) => {
+  try {
+    const { name, Phone, Role, JoiningDate, SalaryType, SalaryAmount } = req.body;
+    if (!name || !name.trim()) {
+      return res.status(400).json({ message: "Name is required" });
+    }
+    const amt = Number(SalaryAmount);
+    if (!Number.isFinite(amt) || amt < 0) {
+      return res.status(400).json({ message: "Enter a valid salary amount" });
+    }
+
+    const prefix = `EMP-${new Date().getFullYear()}-`;
+    const latest = await employee.findOne({ EmployeeID: { $regex: `^${prefix}` } }).sort({ EmployeeID: -1 });
+    let num = 1;
+    if (latest) {
+      const n = parseInt(latest.EmployeeID.slice(prefix.length), 10);
+      if (!isNaN(n)) num = n + 1;
+    }
+    const EmployeeID = `${prefix}${String(num).padStart(4, "0")}`;
+
+    const newEmployee = new employee({
+      EmployeeID,
+      name: name.trim(),
+      Phone: (Phone || "").trim(),
+      Role: (Role || "").trim(),
+      JoiningDate: JoiningDate || "",
+      SalaryType: SalaryType === "Daily" ? "Daily" : "Monthly",
+      SalaryAmount: amt
+    });
+    await newEmployee.save();
+
+    res.status(201).json({ message: "Employee added", employee: newEmployee });
+  } catch (error) {
+    res.status(500).json({ message: "Error adding employee", error: error.message });
+  }
+});
+
+app.patch("/employees/:id", requireAdmin, async (req, res) => {
+  try {
+    const emp = await employee.findById(req.params.id);
+    if (!emp) {
+      return res.status(404).json({ message: "Employee not found" });
+    }
+    const { name, Phone, Role, JoiningDate, SalaryType, SalaryAmount, Active } = req.body;
+
+    if (name !== undefined) {
+      if (!name.trim()) return res.status(400).json({ message: "Name is required" });
+      emp.name = name.trim();
+    }
+    if (Phone !== undefined) emp.Phone = Phone.trim();
+    if (Role !== undefined) emp.Role = Role.trim();
+    if (JoiningDate !== undefined) emp.JoiningDate = JoiningDate;
+    if (SalaryType !== undefined) emp.SalaryType = SalaryType === "Daily" ? "Daily" : "Monthly";
+    if (SalaryAmount !== undefined) {
+      const amt = Number(SalaryAmount);
+      if (!Number.isFinite(amt) || amt < 0) return res.status(400).json({ message: "Enter a valid salary amount" });
+      emp.SalaryAmount = amt;
+    }
+    if (Active !== undefined) emp.Active = !!Active;
+
+    await emp.save();
+    res.status(200).json({ message: "Employee updated", employee: emp });
+  } catch (error) {
+    res.status(500).json({ message: "Error updating employee", error: error.message });
+  }
+});
+
+app.delete("/employees/:id", requireAdmin, async (req, res) => {
+  try {
+    const emp = await employee.findById(req.params.id);
+    if (!emp) {
+      return res.status(404).json({ message: "Employee not found" });
+    }
+    emp.Deleted = true;
+    emp.DeletedAt = new Date().toISOString();
+    await emp.save();
+    res.status(200).json({ message: "Employee deleted" });
+  } catch (error) {
+    res.status(500).json({ message: "Error deleting employee", error: error.message });
+  }
+});
+
+app.post("/employees/:id/restore", requireAdmin, async (req, res) => {
+  try {
+    const emp = await employee.findById(req.params.id);
+    if (!emp) {
+      return res.status(404).json({ message: "Employee not found" });
+    }
+    emp.Deleted = false;
+    emp.DeletedAt = null;
+    await emp.save();
+    res.status(200).json({ message: "Employee restored", employee: emp });
+  } catch (error) {
+    res.status(500).json({ message: "Error restoring employee", error: error.message });
+  }
+});
+
+app.delete("/employees/:id/forever", requireAdmin, async (req, res) => {
+  try {
+    const removed = await employee.findByIdAndDelete(req.params.id);
+    if (!removed) {
+      return res.status(404).json({ message: "Employee not found" });
+    }
+    await attendance.deleteMany({ Employee: req.params.id });
+    res.status(200).json({ message: "Employee permanently deleted" });
+  } catch (error) {
+    res.status(500).json({ message: "Error deleting employee", error: error.message });
+  }
+});
+
+// RECORD A SALARY PAYMENT
+app.post("/employees/:id/salary", requireAdmin, async (req, res) => {
+  try {
+    const { forMonth, amount, mode, date } = req.body;
+    const amt = Number(amount);
+    if (!forMonth || !/^\d{4}-\d{2}$/.test(forMonth)) {
+      return res.status(400).json({ message: "forMonth must be in YYYY-MM format" });
+    }
+    if (!Number.isFinite(amt) || amt <= 0) {
+      return res.status(400).json({ message: "Enter a valid amount" });
+    }
+    const emp = await employee.findById(req.params.id);
+    if (!emp) {
+      return res.status(404).json({ message: "Employee not found" });
+    }
+    emp.Payments.push({ forMonth, amount: amt, mode: mode || "Cash", date: date || new Date().toISOString().slice(0, 10) });
+    await emp.save();
+    res.status(201).json({ message: "Payment recorded", employee: emp });
+  } catch (error) {
+    res.status(500).json({ message: "Error recording payment", error: error.message });
+  }
+});
+
+// MARK/UPDATE ATTENDANCE FOR ONE EMPLOYEE ON ONE DAY (upsert)
+app.post("/attendance", requireAdmin, async (req, res) => {
+  try {
+    const { Employee, Date: dateStr, Status } = req.body;
+    if (!Employee || !mongoose.isValidObjectId(Employee)) {
+      return res.status(400).json({ message: "A valid employee is required" });
+    }
+    if (!dateStr || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+      return res.status(400).json({ message: "Date must be in YYYY-MM-DD format" });
+    }
+    if (!["Present", "Absent", "Half Day", "Leave"].includes(Status)) {
+      return res.status(400).json({ message: "Invalid attendance status" });
+    }
+    const rec = await attendance.findOneAndUpdate(
+      { Employee, Date: dateStr },
+      { Employee, Date: dateStr, Status },
+      { new: true, upsert: true }
+    );
+    res.status(200).json({ message: "Attendance marked", record: rec });
+  } catch (error) {
+    res.status(500).json({ message: "Error marking attendance", error: error.message });
+  }
+});
+
+// GET ATTENDANCE FOR A MONTH (all employees) — e.g. /attendance?month=2026-10
+app.get("/attendance", requireAdmin, async (req, res) => {
+  try {
+    const month = req.query.month;
+    if (!month || !/^\d{4}-\d{2}$/.test(month)) {
+      return res.status(400).json({ message: "month query param must be YYYY-MM" });
+    }
+    const records = await attendance.find({ Date: { $regex: `^${month}` } });
+    res.status(200).json(records);
+  } catch (error) {
+    res.status(500).json({ message: "Error fetching attendance", error: error.message });
+  }
+});
+
+// Salary math lives here, in one place, so the list view, the attendance
+// view, and the payment form all agree with each other.
+//
+// Policy (per the user's "per day deduction" request):
+//   - Monthly salary: per-day rate = SalaryAmount / calendar days in that
+//     month. Each Absent day deducts one full per-day rate; each Half Day
+//     deducts half. Leave is treated as paid (no deduction) — it's kept as
+//     its own status separate from Absent specifically so approved leave
+//     doesn't cost the employee. If that's not the intended policy, this
+//     is the one place to change it.
+//   - Daily wage: there's no fixed monthly gross to deduct from — pay is
+//     simply (days present × rate) + (half days × rate / 2).
+function daysInMonth(ym) {
+  const [y, m] = ym.split("-").map(Number);
+  return new Date(y, m, 0).getDate();
+}
+async function salarySummaryFor(emp, ym) {
+  const days = daysInMonth(ym);
+  const perDay = emp.SalaryType === "Daily" ? emp.SalaryAmount : emp.SalaryAmount / days;
+  const recs = await attendance.find({ Employee: emp._id, Date: { $regex: `^${ym}` } });
+  const count = s => recs.filter(r => r.Status === s).length;
+  const presentDays = count("Present"), absentDays = count("Absent"), halfDays = count("Half Day"), leaveDays = count("Leave");
+  const paid = (emp.Payments || []).filter(p => p.forMonth === ym).reduce((t, p) => t + (Number(p.amount) || 0), 0);
+
+  let grossSalary, deduction, netSalary;
+  if (emp.SalaryType === "Daily") {
+    grossSalary = null;
+    deduction = null;
+    netSalary = perDay * presentDays + perDay * 0.5 * halfDays;
+  } else {
+    grossSalary = emp.SalaryAmount;
+    deduction = perDay * absentDays + perDay * 0.5 * halfDays;
+    netSalary = Math.max(grossSalary - deduction, 0);
+  }
+
+  return {
+    EmployeeId: String(emp._id),
+    forMonth: ym,
+    daysInMonth: days,
+    perDay,
+    presentDays, absentDays, halfDays, leaveDays,
+    grossSalary, deduction, netSalary,
+    paid,
+    due: netSalary - paid
+  };
+}
+
+// SALARY SUMMARY FOR EVERY EMPLOYEE, FOR ONE MONTH
+app.get("/employees/summary", requireAdmin, async (req, res) => {
+  try {
+    const month = req.query.month;
+    if (!month || !/^\d{4}-\d{2}$/.test(month)) {
+      return res.status(400).json({ message: "month query param must be YYYY-MM" });
+    }
+    const emps = await employee.find({ Deleted: { $ne: true } }).sort({ name: 1 });
+    const summaries = await Promise.all(emps.map(e => salarySummaryFor(e, month)));
+    res.status(200).json(summaries);
+  } catch (error) {
+    res.status(500).json({ message: "Error computing salary summary", error: error.message });
+  }
+});
+
+// SALARY SUMMARY FOR ONE EMPLOYEE, FOR ONE MONTH
+app.get("/employees/:id/summary", requireAdmin, async (req, res) => {
+  try {
+    const month = req.query.month;
+    if (!month || !/^\d{4}-\d{2}$/.test(month)) {
+      return res.status(400).json({ message: "month query param must be YYYY-MM" });
+    }
+    const emp = await employee.findById(req.params.id);
+    if (!emp) {
+      return res.status(404).json({ message: "Employee not found" });
+    }
+    res.status(200).json(await salarySummaryFor(emp, month));
+  } catch (error) {
+    res.status(500).json({ message: "Error computing salary summary", error: error.message });
   }
 });
 
