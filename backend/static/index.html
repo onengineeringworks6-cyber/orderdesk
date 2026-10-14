@@ -78,6 +78,11 @@
   }
   input:focus, select:focus { border-color: var(--green); outline: none; box-shadow: 0 0 0 3px var(--green-soft); }
   .field { margin-bottom: 14px; }
+  .phone-wrap { display: flex; align-items: stretch; border: 1px solid var(--line); border-radius: 9px; background: var(--white); overflow: hidden; }
+  .phone-wrap:focus-within { border-color: var(--green); outline: none; box-shadow: 0 0 0 3px var(--green-soft); }
+  .phone-wrap span { display: flex; align-items: center; padding: 0 10px; background: #fafcfb; color: var(--muted); font-size: 14px; border-right: 1px solid var(--line); flex: none; }
+  .phone-wrap input { border: 0; border-radius: 0; flex: 1; box-shadow: none !important; }
+  .phone-wrap input:focus { box-shadow: none; }
   .two { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
   .err { color: var(--danger); font-size: 14px; min-height: 20px; margin: 0 0 8px; }
 
@@ -471,6 +476,29 @@ function waLink(phone, text) {
   const digits = String(phone || '').replace(/\D/g, '');
   const intl = digits.length === 10 ? '91' + digits : digits;
   return `https://wa.me/${intl}?text=${encodeURIComponent(text)}`;
+}
+/* ---- phone field: shows a fixed +91 prefix, auto-cleans typed/pasted numbers down to 10 digits ---- */
+function normalizePhone(raw) {
+  let digits = String(raw || '').replace(/\D/g, '');
+  if (digits.length > 10 && digits.startsWith('91')) digits = digits.slice(2);
+  if (digits.length > 10 && digits.startsWith('0')) digits = digits.replace(/^0+/, '');
+  return digits.slice(-10);
+}
+function phoneField(id, label, value, required) {
+  return `<div class="field"><label for="${id}">${esc(label)}</label>
+    <div class="phone-wrap"><span>+91</span><input id="${id}" name="${id}" inputmode="numeric" maxlength="10" pattern="\\d{10}" title="10 digits" value="${esc(value || '')}" ${required ? 'required' : ''}></div></div>`;
+}
+function wirePhoneInputs(root) {
+  (root || document).querySelectorAll('.phone-wrap input').forEach(inp => {
+    const clean = () => { const v = normalizePhone(inp.value); if (v !== inp.value) inp.value = v; };
+    inp.addEventListener('input', clean);
+    inp.addEventListener('paste', e => {
+      e.preventDefault();
+      const text = (e.clipboardData || window.clipboardData).getData('text');
+      inp.value = normalizePhone(text);
+    });
+    inp.addEventListener('blur', clean);
+  });
 }
 function compressImage(file, maxDim = 1000, quality = 0.6) {
   return new Promise((resolve, reject) => {
@@ -1393,7 +1421,8 @@ function clientsList() {
     <div class="list-head grid">${isAdmin ? '<span>Name</span><span>Phone</span><span>Orders</span><span>Active</span><span class="num">Balance due</span>' : '<span>Name</span><span>Phone</span><span>Orders</span><span>Active</span>'}</div>
     ${rows.map(c => {
       const stats = clientStats(c._id);
-      const os = clientOrders(c._id);
+      const allOs = clientOrders(c._id);
+      const os = allOs.filter(o => o.Status === 'Active');
       return `<details class="row"><summary class="grid">
         <span class="cellc"><span class="av sm">${initial(c.name)}</span><span class="strong">${esc(c.name)}</span>${(!c.Phone || !c.Add) ? '<span class="pill pending" style="margin-left:6px">Incomplete</span>' : ''}</span>
         <span>${c.Phone ? esc(c.Phone) : '<span class="muted">—</span>'}</span><span>${stats.TotalOrders}</span><span>${stats.ActiveOrders}</span>${isAdmin ? `<span class="num strong">${money(stats.BalanceDue)}</span>` : ''}
@@ -1402,7 +1431,7 @@ function clientsList() {
         <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:12px">
           <p class="addr" style="margin:0">${c.Add ? esc(c.Add) : '<span class="muted">No address yet — tap Edit to add one</span>'}</p>
           ${isAdmin ? `<div style="display:flex;gap:8px;flex:none;flex-wrap:wrap;justify-content:flex-end">
-            ${os.length ? `<button class="btn sm" data-statement-client="${esc(c._id)}">Statement</button>` : ''}
+            ${allOs.length ? `<button class="btn sm" data-statement-client="${esc(c._id)}">Statement</button>` : ''}
             ${stats.BalanceDue > 0 ? `<button class="btn sm" data-remind-client="${esc(c._id)}">Remind</button>` : ''}
             <button class="btn sm" data-edit-client="${esc(c._id)}">Edit</button>
             <button class="btn sm" data-delete-client="${esc(c._id)}">Delete</button>
@@ -1412,20 +1441,21 @@ function clientsList() {
           <thead><tr><th>Order</th><th>Type</th><th>Delivery</th>${isAdmin ? '<th class="num">Total</th><th class="num">Advance</th><th class="num">Remaining</th>' : ''}<th>Status</th><th>Stage</th></tr></thead>
           <tbody>${os.map(o => `<tr><td class="strong">${esc(orderTitle(o))}</td><td>${typePill(o.OrderType)}</td><td>${fmtDate(o.DeliveryDate)}</td>
             ${isAdmin ? `<td class="num">${money(o.TotalValue)}</td><td class="num">${money(o.Advance)}</td><td class="num">${money(o.RemainingPayment)}</td>` : ''}
-            <td>${statusPill(o.Status)}</td><td>${stageDots(o.Stage, o.OrderType)}</td></tr>`).join('')}</tbody></table></div>` : '<p class="muted" style="margin:0">No orders yet for this client.</p>'}
+            <td>${statusPill(o.Status)}</td><td>${stageDots(o.Stage, o.OrderType)}</td></tr>`).join('')}</tbody></table></div>`
+          : `<p class="muted" style="margin:0">${allOs.length ? 'No active orders for this client right now.' : 'No orders yet for this client.'}</p>`}
       </div></details>`;
     }).join('')}</div>`;
 }
 function openClientForm() {
   const fields = `
     <div class="field"><label for="name">Name</label><input id="name" name="name" required></div>
-    <div class="field"><label for="Phone">Phone</label><input id="Phone" name="Phone" inputmode="numeric" maxlength="10" pattern="\\d{10}" title="10 digits" required></div>
+    ${phoneField('Phone', 'Phone', '', true)}
     <div class="field"><label for="Add">Address</label><input id="Add" name="Add" required></div>`;
   openForm('New client', fields, 'Add client', async d => {
     const r = await api('/newclient', 'POST', d);
     toast('Client added');
     patchClient(r.client);
-  });
+  }, () => wirePhoneInputs($('#f')));
 }
 
 function editClientForm(id) {
@@ -1433,13 +1463,13 @@ function editClientForm(id) {
   if (!c) return;
   const fields = `
     <div class="field"><label for="name">Name</label><input id="name" name="name" value="${esc(c.name)}" required></div>
-    <div class="field"><label for="Phone">Phone</label><input id="Phone" name="Phone" inputmode="numeric" maxlength="10" pattern="\\d{10}" title="10 digits" value="${esc(c.Phone)}"></div>
+    ${phoneField('Phone', 'Phone', c.Phone)}
     <div class="field"><label for="Add">Address</label><input id="Add" name="Add" value="${esc(c.Add)}"></div>`;
   openForm(`Edit ${c.name}`, fields, 'Save changes', async d => {
     const r = await api(`/clients/${encodeURIComponent(c._id)}`, 'PATCH', d);
     toast('Client updated');
     patchClient(r.client);
-  });
+  }, () => wirePhoneInputs($('#f')));
 }
 
 function deleteClient(id) {
@@ -1800,7 +1830,7 @@ function openEmployeeForm(existing) {
     <div class="field"><label for="name">Name</label><input id="name" name="name" value="${isEdit ? esc(existing.name) : ''}" required></div>
     <div class="two">
       <div class="field"><label for="Role">Role / designation</label><input id="Role" name="Role" placeholder="e.g. Machine Operator" value="${isEdit ? esc(existing.Role || '') : ''}"></div>
-      <div class="field"><label for="Phone">Phone</label><input id="Phone" name="Phone" inputmode="numeric" maxlength="10" value="${isEdit ? esc(existing.Phone || '') : ''}"></div>
+      ${phoneField('Phone', 'Phone', isEdit ? existing.Phone : '')}
     </div>
     <div class="two">
       <div class="field"><label for="SalaryType">Salary type</label>
@@ -1820,7 +1850,7 @@ function openEmployeeForm(existing) {
       state.employees.push(r.employee);
     }
     renderEmployees();
-  });
+  }, () => wirePhoneInputs($('#f')));
 }
 
 function openEmployeeActions(id) {
@@ -1936,7 +1966,7 @@ function openQuoteForm(existing) {
       </select></div>
     <div class="two" id="prospectFields">
       <div class="field"><label for="ProspectName">Prospect name</label><input id="ProspectName" name="ProspectName"></div>
-      <div class="field"><label for="ProspectPhone">Phone</label><input id="ProspectPhone" name="ProspectPhone"></div>
+      ${phoneField('ProspectPhone', 'Phone', '')}
     </div>`}
     <div class="field"><label for="Description">What's being quoted</label><input id="Description" name="Description" value="${isEdit ? esc(existing.Description || '') : ''}" required></div>
     <div class="two">
@@ -1960,6 +1990,7 @@ function openQuoteForm(existing) {
     const sel = $('#Client'), pf = $('#prospectFields');
     const upd = () => pf.style.display = sel.value ? 'none' : '';
     sel.onchange = upd; upd();
+    wirePhoneInputs($('#f'));
   });
 }
 
