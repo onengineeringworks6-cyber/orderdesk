@@ -32,10 +32,18 @@ const admin = mongoose.model("Admin", {
   // "admin" sees and manages everything. "worker" can view orders and
   // update Status/Stage/Photos, but never sees money figures and can't
   // create, edit, or delete anything.
+  // Legacy flag — kept for backward compatibility with old accounts and
+  // as a fallback. The real source of truth going forward is RoleId below.
   role: {
     type: String,
     enum: ["admin", "worker"],
     default: "admin"
+  },
+  // The custom (or built-in Owner/Admin/Worker) role this person holds.
+  RoleId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "Role",
+    default: null
   },
   // Account lockout after repeated failed logins. Stored in the database
   // (not in server memory) so it still works correctly on Vercel, where
@@ -56,6 +64,80 @@ const admin = mongoose.model("Admin", {
 // random string, so sessions can't be forged by anyone who reads this code.
 const JWT_SECRET = process.env.JWT_SECRET || "orderdesk-dev-secret-change-me";
 
+//..........................ROLES (custom, Discord-style)..................
+// Three built-in ranks anchor the hierarchy and can never be deleted or
+// renamed: Worker (lowest), Admin (full access, same as "the old admin
+// role"), and Owner — more powerful than any role, including Admin.
+// Anyone can create roles in between (or above Admin, below Owner) and
+// decide exactly what each one can do and what color it shows as.
+const RANK = { OWNER: 1000, ADMIN: 900, WORKER: 100 };
+const PERM_KEYS = ["viewFinancials", "manageOrders", "manageClients", "manageProducts", "manageQuotes", "manageEmployees", "manageTeam", "manageRoles"];
+function sanitizePerms(input) {
+  const out = {};
+  PERM_KEYS.forEach(k => { out[k] = !!(input && input[k]); });
+  return out;
+}
+const ROLE_COLORS = ["#2f8f5b", "#1f7a8c", "#a0522d", "#8e44ad", "#c0392b", "#d68910", "#16a085", "#5d6a63"];
+function randomRoleColor() { return ROLE_COLORS[Math.floor(Math.random() * ROLE_COLORS.length)]; }
+
+const teamRole = mongoose.model("Role", new mongoose.Schema({
+  name: { type: String, required: true, trim: true },
+  color: { type: String, default: "#5d6a63" },
+  rank: { type: Number, required: true }, // higher number = more authority
+  permissions: {
+    viewFinancials: { type: Boolean, default: false },
+    manageOrders: { type: Boolean, default: false },
+    manageClients: { type: Boolean, default: false },
+    manageProducts: { type: Boolean, default: false },
+    manageQuotes: { type: Boolean, default: false },
+    manageEmployees: { type: Boolean, default: false },
+    manageTeam: { type: Boolean, default: false },
+    manageRoles: { type: Boolean, default: false }
+  },
+  isSystem: { type: Boolean, default: false } // Owner / Admin / Worker — fixed, can't be edited or deleted
+}));
+
+// Creates the three built-in roles once, if they don't already exist.
+// Safe to call repeatedly (e.g. on every cold start).
+async function ensureSystemRoles() {
+  const fullPerms = sanitizePerms({ viewFinancials: true, manageOrders: true, manageClients: true, manageProducts: true, manageQuotes: true, manageEmployees: true, manageTeam: true, manageRoles: true });
+  const seeds = [
+    { name: "Owner", color: "#e0b000", rank: RANK.OWNER, isSystem: true, permissions: fullPerms },
+    { name: "Admin", color: "#2f8f5b", rank: RANK.ADMIN, isSystem: true, permissions: fullPerms },
+    { name: "Worker", color: "#5d6a63", rank: RANK.WORKER, isSystem: true, permissions: sanitizePerms({}) }
+  ];
+  for (const s of seeds) {
+    if (!(await teamRole.findOne({ name: s.name }))) await new teamRole(s).save();
+  }
+}
+// One-time, self-healing migration: give every existing team member (who
+// predates this feature and has no RoleId yet) a real role, based on their
+// old admin/worker flag. The very first account on the system becomes
+// Owner, since it's the one that originally set everything up.
+async function migrateLegacyRoles() {
+  const [ownerRole, adminRole, workerRole] = await Promise.all([
+    teamRole.findOne({ name: "Owner" }), teamRole.findOne({ name: "Admin" }), teamRole.findOne({ name: "Worker" })
+  ]);
+  if (!ownerRole || !adminRole || !workerRole) return;
+  const ownerTaken = await admin.exists({ RoleId: ownerRole._id });
+  const legacy = await admin.find({ RoleId: null }).sort({ _id: 1 });
+  for (let i = 0; i < legacy.length; i++) {
+    const u = legacy[i];
+    if (!ownerTaken && i === 0 && u.role !== "worker") u.RoleId = ownerRole._id;
+    else u.RoleId = u.role === "worker" ? workerRole._id : adminRole._id;
+    await u.save();
+  }
+}
+ensureSystemRoles().then(migrateLegacyRoles).catch(err => console.error("Could not set up roles:", err.message));
+
+// Hierarchy rule (same idea as Discord): you can only create, edit, delete,
+// or assign a role — or manage a team member — whose authority is strictly
+// below your own. No one can touch their own rank or higher, which is what
+// keeps Owner (and other people at your own level) safe from being edited.
+function canManageRank(req, targetRank) {
+  return req.user.rank > targetRank;
+}
+
 // Require a valid login token on every route this runs before.
 async function requireAuth(req, res, next) {
   const header = req.headers.authorization || "";
@@ -67,11 +149,30 @@ async function requireAuth(req, res, next) {
     const decoded = jwt.verify(token, JWT_SECRET);
     // Look the user up every time, so removing or demoting someone takes
     // effect immediately instead of when their 30-day token runs out.
-    const user = await admin.findById(decoded.id, "username role");
+    const user = await admin.findById(decoded.id, "username role RoleId").populate("RoleId");
     if (!user) {
       return res.status(401).json({ message: "This account no longer exists" });
     }
-    req.user = { id: String(user._id), username: user.username, role: user.role || "admin" };
+    let roleDoc = user.RoleId;
+    if (!roleDoc) {
+      // Self-healing fallback in case migration hasn't run yet for this account.
+      roleDoc = await teamRole.findOne({ name: user.role === "admin" ? "Admin" : "Worker" });
+      if (roleDoc) { user.RoleId = roleDoc._id; await user.save(); }
+    }
+    const rank = roleDoc ? roleDoc.rank : (user.role === "admin" ? RANK.ADMIN : RANK.WORKER);
+    req.user = {
+      id: String(user._id),
+      username: user.username,
+      // Legacy admin/worker flag, kept exactly as before so every existing
+      // check in this file (money fields, order actions, etc.) still works
+      // unchanged: anyone at Admin rank or above counts as "admin".
+      role: rank >= RANK.ADMIN ? "admin" : "worker",
+      rank,
+      perms: roleDoc ? roleDoc.permissions : sanitizePerms({}),
+      roleId: roleDoc ? String(roleDoc._id) : null,
+      roleName: roleDoc ? roleDoc.name : (user.role === "admin" ? "Admin" : "Worker"),
+      roleColor: roleDoc ? roleDoc.color : "#5d6a63"
+    };
     next();
   } catch (error) {
     return res.status(401).json({ message: "Your session has expired — please log in again" });
@@ -87,9 +188,12 @@ function requireAdmin(req, res, next) {
   next();
 }
 
-// Shape an order for the caller: admins get everything, workers get no money.
+// Shape an order for the caller: admins (and anyone granted the
+// viewFinancials permission on a custom role) get everything, everyone
+// else gets no money.
 function forRole(req, orderDoc) {
-  return req.user.role === "admin" ? orderDoc : stripFinancials(orderDoc);
+  const canView = req.user.role === "admin" || (req.user.perms && req.user.perms.viewFinancials);
+  return canView ? orderDoc : stripFinancials(orderDoc);
 }
 
 // Removes money-related fields from an order before it's sent to a
@@ -106,6 +210,7 @@ function stripFinancials(orderDoc) {
 // any separate secret or manual step.
 app.post('/signup', async (req, res) => {
   try {
+    await ensureSystemRoles(); // make sure Owner/Admin/Worker exist before we assign one
     const existingCount = await admin.countDocuments();
     if (existingCount > 0) {
       return res.status(403).json({ message: "Signup is closed — an admin account already exists." });
@@ -117,7 +222,10 @@ app.post('/signup', async (req, res) => {
     }
 
     const hashed = await bcrypt.hash(password, 10);
-    const newAdmin = new admin({ username, password: hashed });
+    // The very first account on the system is the one setting everything
+    // up, so it becomes Owner — more powerful than any role, including Admin.
+    const ownerRole = await teamRole.findOne({ name: "Owner" });
+    const newAdmin = new admin({ username, password: hashed, role: "admin", RoleId: ownerRole ? ownerRole._id : null });
 
     await newAdmin.save();
 
@@ -191,12 +299,21 @@ app.post('/login', async (req, res) => {
       { expiresIn: "30d" }
     );
 
+    // Include the real role's name/color/rank so the UI can show it right
+    // away, without a second round trip. (Authorization itself never trusts
+    // this response or the token — requireAuth re-checks from the DB.)
+    let roleDoc = existingAdmin.RoleId ? await teamRole.findById(existingAdmin.RoleId) : null;
+    if (!roleDoc) roleDoc = await teamRole.findOne({ name: role === "admin" ? "Admin" : "Worker" });
+
     res.status(200).json({
       message: "Login successful",
       token,
       id: existingAdmin._id.toString(),
       username: existingAdmin.username,
-      role
+      role,
+      roleName: roleDoc ? roleDoc.name : (role === "admin" ? "Admin" : "Worker"),
+      roleColor: roleDoc ? roleDoc.color : "#5d6a63",
+      rank: roleDoc ? roleDoc.rank : (role === "admin" ? RANK.ADMIN : RANK.WORKER)
     });
 
   } catch (error) {
@@ -508,8 +625,9 @@ app.get('/orders', async (req, res) => {
   try {
     const allorders = await orders.find({ Deleted: { $ne: true } });
 
+    const canView = req.user.role === "admin" || (req.user.perms && req.user.perms.viewFinancials);
     res.status(200).json(
-      req.user.role === "admin" ? allorders : allorders.map(stripFinancials)
+      canView ? allorders : allorders.map(stripFinancials)
     );
 
   } catch (error) {
@@ -1153,16 +1271,29 @@ const product = mongoose.model("Product", {
   category: {
     type: String,
     required: true
+  },
+
+  // Optional reference photo — taken or uploaded, compressed client-side
+  // before upload (same data-URL convention as order photos).
+  Photo: {
+    type: String,
+    default: ""
   }
 
 });
+
+const PHOTO_RE = /^data:image\/(jpeg|png|webp|gif);base64,[A-Za-z0-9+\/=]+$/;
+function validPhoto(url) {
+  if (!url) return true; // optional
+  return typeof url === "string" && PHOTO_RE.test(url) && url.length <= 1_800_000;
+}
 
 // ADDING NEW PRODUCT
 app.post("/addproduct", requireAdmin, async (req, res) => {
 
   try {
 
-    const { name, desc, category } = req.body;
+    const { name, desc, category, Photo } = req.body;
 
     // Required field validation
     if (!name || !desc || !category) {
@@ -1170,19 +1301,28 @@ app.post("/addproduct", requireAdmin, async (req, res) => {
         message: "Name, description and category are required"
       });
     }
+    if (!validPhoto(Photo)) {
+      return res.status(400).json({ message: "Photo is invalid or too large — please retake it and try again" });
+    }
 
-    // Generate Product ID
-    const productCount = await product.countDocuments();
-
-    const ProductID =
-      `PROD-${String(productCount + 1).padStart(4, "0")}`;
+    // Generate Product ID — always from the highest existing number,
+    // never a plain count, so it can't collide after a deletion.
+    const prefix = "PROD-";
+    const latest = await product.findOne({ ProductID: { $regex: `^${prefix}` } }).sort({ ProductID: -1 });
+    let num = 1;
+    if (latest) {
+      const n = parseInt(latest.ProductID.slice(prefix.length), 10);
+      if (!isNaN(n)) num = n + 1;
+    }
+    const ProductID = `${prefix}${String(num).padStart(4, "0")}`;
 
     const newProduct = new product({
 
       ProductID,
       name,
       desc,
-      category
+      category,
+      Photo: Photo || ""
 
     });
 
@@ -1205,6 +1345,41 @@ app.post("/addproduct", requireAdmin, async (req, res) => {
       error: error.message
 
     });
+  }
+});
+
+// EDIT A PRODUCT (including adding/changing/removing its photo later)
+app.patch("/products/:id", requireAdmin, async (req, res) => {
+  try {
+    const p = await product.findById(req.params.id);
+    if (!p) {
+      return res.status(404).json({ message: "Product not found" });
+    }
+
+    const { name, desc, category, Photo } = req.body;
+    if (name !== undefined) {
+      if (!name.trim()) return res.status(400).json({ message: "Name is required" });
+      p.name = name.trim();
+    }
+    if (desc !== undefined) {
+      if (!desc.trim()) return res.status(400).json({ message: "Description is required" });
+      p.desc = desc.trim();
+    }
+    if (category !== undefined) {
+      if (!category.trim()) return res.status(400).json({ message: "Category is required" });
+      p.category = category.trim();
+    }
+    if (Photo !== undefined) {
+      if (!validPhoto(Photo)) {
+        return res.status(400).json({ message: "Photo is invalid or too large — please retake it and try again" });
+      }
+      p.Photo = Photo || "";
+    }
+
+    await p.save();
+    res.status(200).json({ message: "Product updated", product: p });
+  } catch (error) {
+    res.status(500).json({ message: "Error updating product", error: error.message });
   }
 });
 
@@ -1232,12 +1407,49 @@ const quote = mongoose.model("Quote", {
   ProspectName: { type: String, trim: true, default: "" },
   ProspectPhone: { type: String, trim: true, default: "" },
   Description: { type: String, trim: true, default: "" },
-  Amount: { type: Number, required: true },
+  // Line items — each may reference a Product (snapshotting its name so the
+  // quote still reads correctly if the product is later renamed/deleted),
+  // or be a fully custom line. Price is always entered manually, per item.
+  Items: [{
+    Product: { type: mongoose.Schema.Types.ObjectId, ref: "Product", default: null },
+    name: { type: String, trim: true, required: true },
+    qty: { type: Number, default: 1 },
+    price: { type: Number, required: true }
+  }],
+  Amount: { type: Number, required: true }, // = sum(qty * price) across Items, computed server-side
   ValidUntil: { type: String, default: "" },
   Status: { type: String, enum: ["Draft", "Sent", "Accepted", "Rejected", "Converted"], default: "Draft" },
   ConvertedOrderId: { type: mongoose.Schema.Types.ObjectId, ref: "Orders", default: null },
+  // Edit history / audit trail — every create, edit and send is logged here.
+  History: [{ event: String, detail: String, date: String }],
   CreatedAt: { type: String, default: () => new Date().toISOString() }
 });
+
+// Parses/validates the Items payload (sent as a JSON string from the
+// client). Throws a plain Error with a user-facing message on bad input.
+function parseQuoteItems(raw) {
+  let items;
+  if (typeof raw === "string") {
+    try { items = JSON.parse(raw); } catch { throw new Error("Items are invalid — please re-add them"); }
+  } else {
+    items = raw;
+  }
+  if (!Array.isArray(items) || !items.length) {
+    throw new Error("Add at least one item to the quotation");
+  }
+  return items.map(it => {
+    const name = String((it && it.name) || "").trim();
+    const price = Number(it && it.price);
+    const qty = Number(it && it.qty) || 1;
+    if (!name) throw new Error("Every item needs a name");
+    if (!Number.isFinite(price) || price < 0) throw new Error(`Enter a valid price for "${name}"`);
+    if (!Number.isFinite(qty) || qty <= 0) throw new Error(`Enter a valid quantity for "${name}"`);
+    return { Product: (it && it.Product) || null, name, qty, price };
+  });
+}
+function quoteItemsTotal(items) {
+  return items.reduce((t, it) => t + it.price * it.qty, 0);
+}
 
 app.get("/quotes", requireAdmin, async (req, res) => {
   try {
@@ -1250,12 +1462,12 @@ app.get("/quotes", requireAdmin, async (req, res) => {
 
 app.post("/quotes", requireAdmin, async (req, res) => {
   try {
-    const { Client, ProspectName, ProspectPhone, Description, Amount, ValidUntil } = req.body;
-    const amt = Number(Amount);
+    const { Client, ProspectName, ProspectPhone, Description, ValidUntil, Items } = req.body;
 
-    if (!Number.isFinite(amt) || amt <= 0) {
-      return res.status(400).json({ message: "Enter a valid amount" });
-    }
+    let items;
+    try { items = parseQuoteItems(Items); } catch (e) { return res.status(400).json({ message: e.message }); }
+    const amt = quoteItemsTotal(items);
+
     if (!(Client && Client.trim()) && !(ProspectName && ProspectName.trim())) {
       return res.status(400).json({ message: "Pick a client or enter a prospect's name" });
     }
@@ -1268,6 +1480,7 @@ app.post("/quotes", requireAdmin, async (req, res) => {
       if (!isNaN(n)) num = n + 1;
     }
     const QuoteID = `${prefix}${String(num).padStart(4, "0")}`;
+    const now = new Date().toISOString();
 
     const newQuote = new quote({
       QuoteID,
@@ -1275,8 +1488,10 @@ app.post("/quotes", requireAdmin, async (req, res) => {
       ProspectName: (ProspectName || "").trim(),
       ProspectPhone: (ProspectPhone || "").trim(),
       Description: (Description || "").trim(),
+      Items: items,
       Amount: amt,
-      ValidUntil: ValidUntil || ""
+      ValidUntil: ValidUntil || "",
+      History: [{ event: "Created", detail: `Quotation created with ${items.length} item${items.length === 1 ? "" : "s"}, total ₹${amt}`, date: now }]
     });
     await newQuote.save();
 
@@ -1296,30 +1511,65 @@ app.patch("/quotes/:id", requireAdmin, async (req, res) => {
       return res.status(400).json({ message: "This quotation has already been converted to an order" });
     }
 
-    const { Status, Description, Amount, ValidUntil, ProspectName, ProspectPhone } = req.body;
+    const { Status, Description, ValidUntil, ProspectName, ProspectPhone, Items } = req.body;
+    const now = new Date().toISOString();
+    const changes = [];
 
     if (Status !== undefined) {
       if (!["Draft", "Sent", "Accepted", "Rejected"].includes(Status)) {
         return res.status(400).json({ message: "Invalid status" });
       }
-      q.Status = Status;
+      if (Status !== q.Status) { changes.push(`Status changed from ${q.Status} to ${Status}`); q.Status = Status; }
     }
-    if (Description !== undefined) q.Description = Description.trim();
-    if (Amount !== undefined) {
-      const amt = Number(Amount);
-      if (!Number.isFinite(amt) || amt <= 0) {
-        return res.status(400).json({ message: "Enter a valid amount" });
-      }
-      q.Amount = amt;
+    if (Items !== undefined) {
+      let items;
+      try { items = parseQuoteItems(Items); } catch (e) { return res.status(400).json({ message: e.message }); }
+      const newAmt = quoteItemsTotal(items);
+      if (newAmt !== q.Amount) changes.push(`Amount changed from ₹${q.Amount} to ₹${newAmt}`);
+      changes.push(`Items updated (${items.length} item${items.length === 1 ? "" : "s"})`);
+      q.Items = items;
+      q.Amount = newAmt;
     }
-    if (ValidUntil !== undefined) q.ValidUntil = ValidUntil;
-    if (ProspectName !== undefined) q.ProspectName = ProspectName.trim();
-    if (ProspectPhone !== undefined) q.ProspectPhone = ProspectPhone.trim();
+    if (Description !== undefined && Description.trim() !== q.Description) {
+      changes.push("Notes updated");
+      q.Description = Description.trim();
+    }
+    if (ValidUntil !== undefined && (ValidUntil || "") !== (q.ValidUntil || "")) {
+      changes.push(`Valid-until date changed`);
+      q.ValidUntil = ValidUntil || "";
+    }
+    if (ProspectName !== undefined && ProspectName.trim() !== q.ProspectName) {
+      changes.push("Prospect name updated");
+      q.ProspectName = ProspectName.trim();
+    }
+    if (ProspectPhone !== undefined && ProspectPhone.trim() !== q.ProspectPhone) {
+      changes.push("Prospect phone updated");
+      q.ProspectPhone = ProspectPhone.trim();
+    }
+
+    if (changes.length) q.History.push({ event: "Edited", detail: changes.join("; "), date: now });
 
     await q.save();
     res.status(200).json({ message: "Quotation updated", quote: q });
   } catch (error) {
     res.status(500).json({ message: "Error updating quotation", error: error.message });
+  }
+});
+
+// MARK A QUOTATION AS SENT TO THE CLIENT (logged separately from a manual status change)
+app.post("/quotes/:id/send", requireAdmin, async (req, res) => {
+  try {
+    const q = await quote.findById(req.params.id);
+    if (!q) {
+      return res.status(404).json({ message: "Quotation not found" });
+    }
+    const now = new Date().toISOString();
+    if (q.Status === "Draft") q.Status = "Sent";
+    q.History.push({ event: "Sent", detail: "Quotation sent to client on WhatsApp", date: now });
+    await q.save();
+    res.status(200).json({ message: "Marked as sent", quote: q });
+  } catch (error) {
+    res.status(500).json({ message: "Error marking quotation sent", error: error.message });
   }
 });
 
@@ -1366,9 +1616,14 @@ app.post("/quotes/:id/convert", requireAdmin, async (req, res) => {
     const now = new Date().toISOString();
     const today = now.slice(0, 10);
 
+    const itemsText = (q.Items && q.Items.length)
+      ? q.Items.map(it => `${it.name}${it.qty > 1 ? ` x${it.qty}` : ""} — ₹${it.price}`).join(", ")
+      : (q.Description || "");
+    const orderName = q.Description || (q.Items && q.Items[0] && q.Items[0].name) || OrderID;
+
     const newOrder = new orders({
       OrderID,
-      OrderName: q.Description ? q.Description.slice(0, 60) : OrderID,
+      OrderName: orderName.slice(0, 60),
       OrderType: "New Order",
       Client: clientId,
       ReceivingDate: today,
@@ -1377,7 +1632,7 @@ app.post("/quotes/:id/convert", requireAdmin, async (req, res) => {
       AdvanceMode: "Cash",
       AdvanceDate: today,
       TotalValue: q.Amount,
-      ItemDetails: q.Description,
+      ItemDetails: itemsText,
       RemainingPayment: q.Amount,
       AdvanceHistory: [],
       History: [{ event: "Created", detail: `Order created from quotation ${q.QuoteID}`, date: now }]
@@ -1386,6 +1641,7 @@ app.post("/quotes/:id/convert", requireAdmin, async (req, res) => {
 
     q.Status = "Converted";
     q.ConvertedOrderId = newOrder._id;
+    q.History.push({ event: "Converted", detail: `Converted to order ${OrderID}`, date: now });
     await q.save();
 
     res.status(201).json({ message: "Quotation converted to order", order: newOrder, quote: q });
@@ -1687,12 +1943,117 @@ app.get("/employees/:id/summary", requireAdmin, async (req, res) => {
   }
 });
 
+//..........................ROLES (admin only)...........................
+// LIST ALL ROLES — anyone logged in can see them (needed to show colored
+// role badges), but only an admin-or-above can create/edit/delete them.
+app.get("/roles", async (req, res) => {
+  try {
+    const all = await teamRole.find({}).sort({ rank: -1 });
+    res.status(200).json(all);
+  } catch (error) {
+    res.status(500).json({ message: "Error fetching roles", error: error.message });
+  }
+});
+
+// CREATE A NEW ROLE
+app.post("/roles", requireAdmin, async (req, res) => {
+  try {
+    const { name, color, rank, permissions } = req.body;
+    const trimmedName = (name || "").trim();
+    if (!trimmedName) return res.status(400).json({ message: "Role name is required" });
+    if (["owner", "admin", "worker"].includes(trimmedName.toLowerCase())) {
+      return res.status(400).json({ message: "That name is reserved for a built-in role" });
+    }
+    if (await teamRole.findOne({ name: new RegExp(`^${trimmedName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i") })) {
+      return res.status(409).json({ message: "A role with that name already exists" });
+    }
+    const rankNum = Number(rank);
+    if (!Number.isFinite(rankNum) || rankNum < 1 || rankNum >= RANK.OWNER) {
+      return res.status(400).json({ message: "Rank must be a number between 1 and 999" });
+    }
+    if (!canManageRank(req, rankNum)) {
+      return res.status(403).json({ message: "You can't create a role with authority equal to or above your own" });
+    }
+
+    const newRole = new teamRole({ name: trimmedName, color: color || randomRoleColor(), rank: rankNum, permissions: sanitizePerms(permissions), isSystem: false });
+    await newRole.save();
+    res.status(201).json({ message: "Role created", role: newRole });
+  } catch (error) {
+    res.status(500).json({ message: "Error creating role", error: error.message });
+  }
+});
+
+// EDIT A ROLE — name, color, rank (its authority/position) and permissions
+app.patch("/roles/:id", requireAdmin, async (req, res) => {
+  try {
+    const r = await teamRole.findById(req.params.id);
+    if (!r) return res.status(404).json({ message: "Role not found" });
+    if (r.isSystem) return res.status(400).json({ message: "Owner, Admin and Worker are built in and can't be edited" });
+    if (!canManageRank(req, r.rank)) return res.status(403).json({ message: "You don't have authority over this role" });
+
+    const { name, color, rank, permissions } = req.body;
+    if (name !== undefined) {
+      const trimmedName = name.trim();
+      if (!trimmedName) return res.status(400).json({ message: "Role name is required" });
+      if (["owner", "admin", "worker"].includes(trimmedName.toLowerCase())) {
+        return res.status(400).json({ message: "That name is reserved for a built-in role" });
+      }
+      const dup = await teamRole.findOne({ _id: { $ne: r._id }, name: new RegExp(`^${trimmedName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i") });
+      if (dup) return res.status(409).json({ message: "A role with that name already exists" });
+      r.name = trimmedName;
+    }
+    if (color !== undefined && color) r.color = color;
+    if (rank !== undefined) {
+      const rankNum = Number(rank);
+      if (!Number.isFinite(rankNum) || rankNum < 1 || rankNum >= RANK.OWNER) {
+        return res.status(400).json({ message: "Rank must be a number between 1 and 999" });
+      }
+      if (!canManageRank(req, rankNum)) {
+        return res.status(403).json({ message: "You can't raise a role's authority to or above your own" });
+      }
+      r.rank = rankNum;
+    }
+    if (permissions !== undefined) r.permissions = sanitizePerms(permissions);
+
+    await r.save();
+    res.status(200).json({ message: "Role updated", role: r });
+  } catch (error) {
+    res.status(500).json({ message: "Error updating role", error: error.message });
+  }
+});
+
+// DELETE A ROLE — members holding it move to Worker
+app.delete("/roles/:id", requireAdmin, async (req, res) => {
+  try {
+    const r = await teamRole.findById(req.params.id);
+    if (!r) return res.status(404).json({ message: "Role not found" });
+    if (r.isSystem) return res.status(400).json({ message: "Owner, Admin and Worker are built in and can't be deleted" });
+    if (!canManageRank(req, r.rank)) return res.status(403).json({ message: "You don't have authority over this role" });
+
+    const workerRole = await teamRole.findOne({ name: "Worker" });
+    await admin.updateMany({ RoleId: r._id }, { RoleId: workerRole ? workerRole._id : null, role: "worker" });
+    await teamRole.findByIdAndDelete(r._id);
+    res.status(200).json({ message: "Role deleted — anyone who had it moved to Worker" });
+  } catch (error) {
+    res.status(500).json({ message: "Error deleting role", error: error.message });
+  }
+});
+
 //..........................TEAM (admin only).........................
 // LIST TEAM MEMBERS
 app.get("/team", requireAdmin, async (req, res) => {
   try {
-    const team = await admin.find({}, "username role");
-    res.status(200).json(team);
+    const team = await admin.find({}, "username role RoleId").populate("RoleId");
+    const shaped = team.map(u => ({
+      _id: u._id,
+      username: u.username,
+      role: u.role, // legacy admin/worker flag, kept for compatibility
+      RoleId: u.RoleId ? u.RoleId._id : null,
+      roleName: u.RoleId ? u.RoleId.name : (u.role === "admin" ? "Admin" : "Worker"),
+      roleColor: u.RoleId ? u.RoleId.color : "#5d6a63",
+      rank: u.RoleId ? u.RoleId.rank : (u.role === "admin" ? RANK.ADMIN : RANK.WORKER)
+    }));
+    res.status(200).json(shaped);
   } catch (error) {
     res.status(500).json({ message: "Error fetching team", error: error.message });
   }
@@ -1701,7 +2062,7 @@ app.get("/team", requireAdmin, async (req, res) => {
 // ADD A TEAM MEMBER
 app.post("/team", requireAdmin, async (req, res) => {
   try {
-    const { username, password, role } = req.body;
+    const { username, password, RoleId } = req.body;
 
     if (!username || !username.trim() || !password || password.length < 6) {
       return res.status(400).json({ message: "Username and a password of at least 6 characters are required" });
@@ -1712,20 +2073,59 @@ app.post("/team", requireAdmin, async (req, res) => {
       return res.status(409).json({ message: "That username is already taken" });
     }
 
+    const chosenRole = RoleId ? await teamRole.findById(RoleId) : await teamRole.findOne({ name: "Worker" });
+    if (!chosenRole) return res.status(400).json({ message: "That role could not be found" });
+    if (!canManageRank(req, chosenRole.rank)) {
+      return res.status(403).json({ message: "You can't grant a role with authority equal to or above your own" });
+    }
+
     const hashed = await bcrypt.hash(password, 10);
     const newMember = new admin({
       username: username.trim(),
       password: hashed,
-      role: role === "admin" ? "admin" : "worker"
+      role: chosenRole.rank >= RANK.ADMIN ? "admin" : "worker",
+      RoleId: chosenRole._id
     });
     await newMember.save();
 
     res.status(201).json({
       message: "Team member added",
-      member: { _id: newMember._id, username: newMember.username, role: newMember.role }
+      member: { _id: newMember._id, username: newMember.username, role: newMember.role, RoleId: chosenRole._id, roleName: chosenRole.name, roleColor: chosenRole.color, rank: chosenRole.rank }
     });
   } catch (error) {
     res.status(500).json({ message: "Error adding team member", error: error.message });
+  }
+});
+
+// CHANGE A TEAM MEMBER'S ROLE (promote/demote)
+app.patch("/team/:id", requireAdmin, async (req, res) => {
+  try {
+    const member = await admin.findById(req.params.id).populate("RoleId");
+    if (!member) return res.status(404).json({ message: "Team member not found" });
+
+    const currentRank = member.RoleId ? member.RoleId.rank : (member.role === "admin" ? RANK.ADMIN : RANK.WORKER);
+    if (!canManageRank(req, currentRank)) {
+      return res.status(403).json({ message: "You don't have authority over this team member" });
+    }
+
+    const { RoleId } = req.body;
+    if (!RoleId) return res.status(400).json({ message: "Pick a role" });
+    const newRole = await teamRole.findById(RoleId);
+    if (!newRole) return res.status(400).json({ message: "That role could not be found" });
+    if (!canManageRank(req, newRole.rank)) {
+      return res.status(403).json({ message: "You can't grant a role with authority equal to or above your own" });
+    }
+
+    member.RoleId = newRole._id;
+    member.role = newRole.rank >= RANK.ADMIN ? "admin" : "worker";
+    await member.save();
+
+    res.status(200).json({
+      message: `${member.username} is now ${newRole.name}`,
+      member: { _id: member._id, username: member.username, role: member.role, RoleId: newRole._id, roleName: newRole.name, roleColor: newRole.color, rank: newRole.rank }
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Error updating team member", error: error.message });
   }
 });
 
@@ -1735,10 +2135,15 @@ app.delete("/team/:id", requireAdmin, async (req, res) => {
     if (req.params.id === req.user.id) {
       return res.status(400).json({ message: "You can't remove your own account while logged in as it" });
     }
-    const removed = await admin.findByIdAndDelete(req.params.id);
-    if (!removed) {
+    const member = await admin.findById(req.params.id).populate("RoleId");
+    if (!member) {
       return res.status(404).json({ message: "Team member not found" });
     }
+    const currentRank = member.RoleId ? member.RoleId.rank : (member.role === "admin" ? RANK.ADMIN : RANK.WORKER);
+    if (!canManageRank(req, currentRank)) {
+      return res.status(403).json({ message: "You don't have authority to remove this team member" });
+    }
+    await admin.findByIdAndDelete(req.params.id);
     res.status(200).json({ message: "Team member removed" });
   } catch (error) {
     res.status(500).json({ message: "Error removing team member", error: error.message });

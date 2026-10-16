@@ -445,7 +445,9 @@ const ICONS = {
   download: '<path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M4 19h16"/>',
   trash: '<path d="M4 7h16"/><path d="M9 7V4h6v3"/><path d="M6 7l1 13h10l1-13"/><path d="M10 11v6"/><path d="M14 11v6"/>',
   quotes: '<path d="M6 3h9l5 5v13a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z"/><path d="M15 3v5h5"/><path d="M8 13h8"/><path d="M8 17h5"/>',
-  employees: '<circle cx="12" cy="8" r="3.4"/><path d="M5 20c0-4 3-6.5 7-6.5s7 2.5 7 6.5"/>'
+  employees: '<circle cx="12" cy="8" r="3.4"/><path d="M5 20c0-4 3-6.5 7-6.5s7 2.5 7 6.5"/>',
+  camera: '<path d="M4 8h3l2-2.5h6L17 8h3a1 1 0 011 1v10a1 1 0 01-1 1H4a1 1 0 01-1-1V9a1 1 0 011-1z"/><circle cx="12" cy="13" r="3.5"/>',
+  upload: '<path d="M12 21V9"/><path d="M7 14l5-5 5 5"/><path d="M4 19h16"/>'
 };
 const icon = n => `<svg class="i" viewBox="0 0 24 24" aria-hidden="true">${ICONS[n]}</svg>`;
 function paintIcons(root = document) { root.querySelectorAll('[data-icon]').forEach(el => { el.innerHTML = icon(el.dataset.icon); el.style.display = 'grid'; }); }
@@ -636,6 +638,9 @@ $('#authForm').addEventListener('submit', async e => {
     localStorage.setItem('odUsername', r.username);
     localStorage.setItem('odUserId', r.id || '');
     localStorage.setItem('odRole', r.role);
+    localStorage.setItem('odRoleName', r.roleName || (r.role === 'admin' ? 'Admin' : 'Worker'));
+    localStorage.setItem('odRoleColor', r.roleColor || '#5d6a63');
+    localStorage.setItem('odRank', r.rank || (r.role === 'admin' ? 900 : 100));
     $('#authForm').reset();
     showApp();
   } catch (err) { $('#authErr').textContent = err.message; }
@@ -648,6 +653,9 @@ function doLogout() {
   localStorage.removeItem('odUsername');
   localStorage.removeItem('odUserId');
   localStorage.removeItem('odRole');
+  localStorage.removeItem('odRoleName');
+  localStorage.removeItem('odRoleColor');
+  localStorage.removeItem('odRank');
   $('#app').hidden = true; $('#auth').hidden = false;
   document.body.classList.remove('nav-open');
   setAuthMode('login');
@@ -658,8 +666,11 @@ function showApp() {
   $('#auth').hidden = true; $('#app').hidden = false;
   const n = localStorage.getItem('odUsername') || 'Admin';
   state.role = localStorage.getItem('odRole') || 'admin';
+  state.roleName = localStorage.getItem('odRoleName') || (state.role === 'admin' ? 'Admin' : 'Worker');
+  state.roleColor = localStorage.getItem('odRoleColor') || '#5d6a63';
+  state.rank = Number(localStorage.getItem('odRank')) || (state.role === 'admin' ? 900 : 100);
   $('#whoName').textContent = n; $('#whoAv').textContent = (n[0] || 'A').toUpperCase();
-  const roleLabel = $('#whoRole'); if (roleLabel) roleLabel.textContent = state.role === 'admin' ? 'Administrator' : 'Worker';
+  const roleLabel = $('#whoRole'); if (roleLabel) roleLabel.textContent = state.roleName;
   state.view = 'dashboard';
   loadAll();
 }
@@ -668,14 +679,16 @@ function showApp() {
 async function loadAll() {
   $('#view').innerHTML = '<p class="muted">Loading…</p>';
   try {
-    const [orders, clients, products, team] = await Promise.all([
+    const [orders, clients, products, team, roles] = await Promise.all([
       api('/orders'), api('/allclients'), api('/products'),
-      state.role === 'admin' ? api('/team') : Promise.resolve([])
+      state.role === 'admin' ? api('/team') : Promise.resolve([]),
+      api('/roles').catch(() => [])
     ]);
     state.orders = orders.slice().reverse();
     state.clients = clients;
     state.products = products;
     state.team = team;
+    state.roles = roles;
     render();
     if (pendingOrderId) {
       const id = pendingOrderId; pendingOrderId = null;
@@ -1489,7 +1502,7 @@ function viewProducts() {
       ${isAdmin ? `<button class="btn primary" id="add"><span data-icon="plus"></span>New product</button>` : ''}</div>
     <div class="toolbar"><input type="search" id="q" placeholder="Search by name or category" aria-label="Search products" value="${esc(state.q)}"></div>
     <div id="list"></div>`;
-  const addBtn = $('#add'); if (addBtn) addBtn.onclick = openProductForm;
+  const addBtn = $('#add'); if (addBtn) addBtn.onclick = () => openProductForm();
   $('#q').oninput = e => { state.q = e.target.value; productsGrid(); };
   productsGrid();
 }
@@ -1500,25 +1513,85 @@ function productsGrid() {
     $('#list').innerHTML = `<div class="card empty"><p>${state.products.length ? 'No products match your search.' : 'No products yet. Add your first product.'}</p></div>`;
     return;
   }
+  const isAdmin = state.role === 'admin';
   $('#list').innerHTML = `<div class="prod-grid">${rows.map(p => {
     const used = state.orders.filter(o => o.Product === p._id).length;
-    return `<div class="card prod"><small>${esc(p.ProductID)}</small><b>${esc(p.name)}</b><p>${esc(p.desc)}</p>
+    return `<div class="card prod"${isAdmin ? ` data-edit-product="${esc(p._id)}" style="cursor:pointer"` : ''}>
+      ${p.Photo ? `<img src="${esc(p.Photo)}" alt="${esc(p.name)}" style="width:100%;aspect-ratio:4/3;object-fit:cover;border-radius:8px;margin-bottom:10px">` : ''}
+      <small>${esc(p.ProductID)}</small><b>${esc(p.name)}</b><p>${esc(p.desc)}</p>
       <div><span class="pill">${esc(p.category)}</span>${used ? `<span class="pill" style="margin-left:6px">${used} order${used === 1 ? '' : 's'}</span>` : ''}</div></div>`;
   }).join('')}</div>`;
+  if (isAdmin) {
+    $('#list').onclick = e => {
+      const card = e.target.closest('[data-edit-product]');
+      if (card) openProductForm(state.products.find(x => x._id === card.dataset.editProduct));
+    };
+  }
 }
-function openProductForm() {
+
+/* ---- product photo picker: take a photo or upload one, compressed client-side, optional ---- */
+function productPhotoField(existingUrl) {
+  return `<div class="field"><label>Photo (optional)</label>
+    <div id="prodPhotoPreview">${existingUrl ? `<img src="${esc(existingUrl)}" alt="" style="width:120px;height:90px;object-fit:cover;border-radius:8px;display:block;margin-bottom:8px">` : ''}</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <label class="btn sm" style="cursor:pointer;display:inline-flex;align-items:center;gap:6px">
+        <span data-icon="camera"></span>Take photo
+        <input type="file" accept="image/*" capture="environment" id="prodPhotoCamera" style="display:none">
+      </label>
+      <label class="btn sm" style="cursor:pointer;display:inline-flex;align-items:center;gap:6px">
+        <span data-icon="upload"></span>Upload
+        <input type="file" accept="image/*" id="prodPhotoUpload" style="display:none">
+      </label>
+      <button type="button" class="btn sm" id="prodPhotoRemove" style="${existingUrl ? '' : 'display:none'}">Remove photo</button>
+    </div>
+    <input type="hidden" id="Photo" name="Photo" value="${esc(existingUrl || '')}"></div>`;
+}
+function wireProductPhotoField(root) {
+  const scope = root || document;
+  const hidden = scope.querySelector('#Photo');
+  const preview = scope.querySelector('#prodPhotoPreview');
+  const removeBtn = scope.querySelector('#prodPhotoRemove');
+  const setPhoto = url => {
+    hidden.value = url || '';
+    preview.innerHTML = url ? `<img src="${esc(url)}" alt="" style="width:120px;height:90px;object-fit:cover;border-radius:8px;display:block;margin-bottom:8px">` : '';
+    removeBtn.style.display = url ? '' : 'none';
+  };
+  const handleFile = async file => {
+    if (!file) return;
+    try {
+      toast('Adding photo…');
+      setPhoto(await compressImage(file));
+    } catch (err) { toast(err.message || 'Could not add photo'); }
+  };
+  scope.querySelector('#prodPhotoCamera').onchange = e => handleFile(e.target.files[0]);
+  scope.querySelector('#prodPhotoUpload').onchange = e => handleFile(e.target.files[0]);
+  removeBtn.onclick = () => setPhoto('');
+  paintIcons(scope);
+}
+
+function openProductForm(existing) {
+  const isEdit = !!existing;
   const cats = [...new Set(state.products.map(p => p.category))];
   const fields = `
-    <div class="field"><label for="name">Name</label><input id="name" name="name" required></div>
-    <div class="field"><label for="category">Category</label><input id="category" name="category" list="cats" required>
-      <datalist id="cats">${cats.map(c => `<option value="${esc(c)}">`).join('')}</datalist></div>
-    <div class="field"><label for="desc">Description</label><input id="desc" name="desc" required></div>`;
-  openForm('New product', fields, 'Add product', async d => {
-    const r = await api('/addproduct', 'POST', d);
-    toast(`Product ${r.product.ProductID} added`);
-    state.products.push(r.product);
+    <div class="field"><label for="name">Name</label><input id="name" name="name" value="${isEdit ? esc(existing.name) : ''}" required></div>
+    <div class="field"><label for="category">Category</label><input id="category" name="category" list="cats" value="${isEdit ? esc(existing.category) : ''}" required>
+      <datalist id="cats">${cats.map(c => `<option value="${esc(c)}">`).join('')}</datalist>
+      <p class="muted" style="margin:4px 0 0;font-size:12px">Pick an existing category or just type a new one.</p></div>
+    <div class="field"><label for="desc">Description</label><input id="desc" name="desc" value="${isEdit ? esc(existing.desc) : ''}" required></div>
+    ${productPhotoField(isEdit ? existing.Photo : '')}`;
+  openForm(isEdit ? `Edit ${existing.name}` : 'New product', fields, isEdit ? 'Save changes' : 'Add product', async d => {
+    if (isEdit) {
+      const r = await api(`/products/${encodeURIComponent(existing._id)}`, 'PATCH', d);
+      toast('Product updated');
+      const i = state.products.findIndex(x => x._id === r.product._id);
+      if (i > -1) state.products[i] = r.product;
+    } else {
+      const r = await api('/addproduct', 'POST', d);
+      toast(`Product ${r.product.ProductID} added`);
+      state.products.push(r.product);
+    }
     render();
-  });
+  }, () => wireProductPhotoField($('#f')));
 }
 
 /* ================= RECENTLY DELETED ================= */
@@ -1642,12 +1715,27 @@ function renderTrash() {
 }
 
 /* ================= TEAM (admin only) ================= */
+/* ---- roles: colored pill, and which roles I'm allowed to touch ---- */
+function rolePill(name, color) {
+  const c = color || '#5d6a63';
+  return `<span class="pill" style="background:${esc(c)}22;color:${esc(c)};border:1px solid ${esc(c)}66">${esc(name)}</span>`;
+}
+const myRank = () => state.rank || (state.role === 'admin' ? 900 : 100);
+const rankBelowMine = r => r.rank < myRank();
+const PERM_LABELS = {
+  viewFinancials: 'See money figures', manageOrders: 'Manage orders', manageClients: 'Manage clients',
+  manageProducts: 'Manage products', manageQuotes: 'Manage quotations', manageEmployees: 'Manage employees',
+  manageTeam: 'Manage team members', manageRoles: 'Manage roles'
+};
+
 async function viewTeam() {
   $('#view').innerHTML = `
-    <div class="head"><div><h1 class="title">Team</h1><p>Give staff their own login. Workers can view orders and update stage, status and photos — they never see money figures.</p></div></div>
+    <div class="head"><div><h1 class="title">Team</h1><p>Give staff their own login, and build roles that control exactly what they can do.</p></div></div>
     <div class="empty" style="margin-top:12px"><p>Loading…</p></div>`;
   try {
-    state.team = await api('/team');
+    const [team, roles] = await Promise.all([api('/team'), api('/roles')]);
+    state.team = team;
+    state.roles = roles;
     renderTeam();
   } catch (err) {
     $('#view').innerHTML += `<div class="card empty"><p>${esc(err.message)}</p></div>`;
@@ -1655,42 +1743,120 @@ async function viewTeam() {
 }
 function renderTeam() {
   const me = localStorage.getItem('odUsername');
+  const roles = (state.roles || []).slice().sort((a, b) => b.rank - a.rank);
   $('#view').innerHTML = `
-    <div class="head"><div><h1 class="title">Team</h1><p>Give staff their own login. Workers can view orders and update stage, status and photos — they never see money figures.</p></div>
-      <button class="btn primary" id="add"><span data-icon="plus"></span>Add team member</button></div>
+    <div class="head"><div><h1 class="title">Team</h1><p>${state.team.length} member${state.team.length === 1 ? '' : 's'} · ${roles.length} role${roles.length === 1 ? '' : 's'}</p></div>
+      <div style="display:flex;gap:8px"><button class="btn" id="addRole"><span data-icon="plus"></span>New role</button>
+      <button class="btn primary" id="add"><span data-icon="plus"></span>Add team member</button></div></div>
     <div class="wrap"><table>
       <thead><tr><th>Username</th><th>Role</th><th></th></tr></thead>
       <tbody>${state.team.map(m => `<tr>
         <td class="strong">${esc(m.username)}${m.username === me ? ' <span class="muted" style="font-weight:400">(you)</span>' : ''}</td>
-        <td><span class="pill ${m.role === 'admin' ? 'done' : ''}">${m.role === 'admin' ? 'Admin' : 'Worker'}</span></td>
-        <td class="num">${m.username === me ? '' : `<button class="btn sm" data-remove-member="${esc(m._id)}">Remove</button>`}</td>
+        <td>${rolePill(m.roleName, m.roleColor)}</td>
+        <td class="num">${m.username === me ? '' : `
+          ${rankBelowMine(m) ? `<button class="btn sm" data-change-role="${esc(m._id)}">Change role</button>` : ''}
+          ${rankBelowMine(m) ? `<button class="btn sm" data-remove-member="${esc(m._id)}" style="margin-left:6px">Remove</button>` : ''}`}</td>
+      </tr>`).join('')}</tbody></table></div>
+    <h2 class="section-title" style="margin-top:28px">Roles</h2>
+    <div class="wrap"><table>
+      <thead><tr><th>Role</th><th>Rank</th><th>Permissions</th><th></th></tr></thead>
+      <tbody>${roles.map(r => `<tr>
+        <td>${rolePill(r.name, r.color)}${r.isSystem ? ' <span class="muted" style="font-size:12px">Built-in</span>' : ''}</td>
+        <td>${r.rank}</td>
+        <td class="muted" style="font-size:12px">${PERM_KEYS_CLIENT.filter(k => r.permissions && r.permissions[k]).map(k => PERM_LABELS[k]).join(', ') || '—'}</td>
+        <td class="num">${(!r.isSystem && rankBelowMine(r)) ? `<button class="btn sm" data-edit-role="${esc(r._id)}">Edit</button>
+          <button class="btn sm" data-delete-role="${esc(r._id)}" style="margin-left:6px">Delete</button>` : ''}</td>
       </tr>`).join('')}</tbody></table></div>`;
   $('#add').onclick = openTeamForm;
+  $('#addRole').onclick = () => openRoleForm();
   $('#view').onclick = async e => {
     const rm = e.target.closest('[data-remove-member]');
-    if (!rm) return;
-    const m = state.team.find(x => x._id === rm.dataset.removeMember);
-    if (!m || !confirm(`Remove ${m.username}? They will no longer be able to log in.`)) return;
-    try {
-      await api(`/team/${encodeURIComponent(m._id)}`, 'DELETE');
-      state.team = state.team.filter(x => x._id !== m._id);
-      toast(`${m.username} removed`);
-      renderTeam();
-    } catch (err) { toast(err.message); }
+    const cr = e.target.closest('[data-change-role]');
+    const er = e.target.closest('[data-edit-role]');
+    const dr = e.target.closest('[data-delete-role]');
+    if (rm) {
+      const m = state.team.find(x => x._id === rm.dataset.removeMember);
+      if (!m || !confirm(`Remove ${m.username}? They will no longer be able to log in.`)) return;
+      try {
+        await api(`/team/${encodeURIComponent(m._id)}`, 'DELETE');
+        state.team = state.team.filter(x => x._id !== m._id);
+        toast(`${m.username} removed`);
+        renderTeam();
+      } catch (err) { toast(err.message); }
+    } else if (cr) {
+      openChangeRoleForm(state.team.find(x => x._id === cr.dataset.changeRole));
+    } else if (er) {
+      openRoleForm(state.roles.find(x => x._id === er.dataset.editRole));
+    } else if (dr) {
+      const r = state.roles.find(x => x._id === dr.dataset.deleteRole);
+      if (!r || !confirm(`Delete role "${r.name}"? Anyone who has it will move to Worker.`)) return;
+      try {
+        await api(`/roles/${encodeURIComponent(r._id)}`, 'DELETE');
+        toast(`${r.name} deleted`);
+        viewTeam();
+      } catch (err) { toast(err.message); }
+    }
   };
   paintIcons($('#view'));
 }
 function openTeamForm() {
+  const assignable = (state.roles || []).filter(rankBelowMine).slice().sort((a, b) => b.rank - a.rank);
   const fields = `
     <div class="field"><label for="username">Username</label><input id="username" name="username" autocomplete="off" required></div>
     <div class="field"><label for="password">Password (min 6 characters)</label><input id="password" name="password" type="text" autocomplete="off" minlength="6" required></div>
-    <div class="field"><label for="role">Role</label>
-      <select id="role" name="role"><option value="worker">Worker — stage, status &amp; photos only</option><option value="admin">Admin — full access</option></select></div>`;
+    <div class="field"><label for="RoleId">Role</label>
+      <select id="RoleId" name="RoleId">${assignable.map(r => `<option value="${esc(r._id)}" ${r.name === 'Worker' ? 'selected' : ''}>${esc(r.name)}</option>`).join('')}</select></div>`;
   openForm('Add team member', fields, 'Add member', async d => {
     const r = await api('/team', 'POST', d);
     state.team.push(r.member);
     toast(`${r.member.username} added`);
     renderTeam();
+  });
+}
+function openChangeRoleForm(member) {
+  if (!member) return;
+  const assignable = (state.roles || []).filter(rankBelowMine).slice().sort((a, b) => b.rank - a.rank);
+  const fields = `<p class="muted" style="margin-top:0">Currently ${esc(member.roleName)}.</p>
+    <div class="field"><label for="RoleId">New role</label>
+      <select id="RoleId" name="RoleId">${assignable.map(r => `<option value="${esc(r._id)}" ${r._id === member.RoleId ? 'selected' : ''}>${esc(r.name)}</option>`).join('')}</select></div>`;
+  openForm(`Change role — ${member.username}`, fields, 'Save', async d => {
+    const r = await api(`/team/${encodeURIComponent(member._id)}`, 'PATCH', d);
+    const i = state.team.findIndex(x => x._id === member._id);
+    if (i > -1) state.team[i] = { ...state.team[i], ...r.member };
+    toast(r.message);
+    renderTeam();
+  });
+}
+
+/* ---- role editor: name, color, rank (authority/position), permission toggles ---- */
+const PERM_KEYS_CLIENT = ['viewFinancials', 'manageOrders', 'manageClients', 'manageProducts', 'manageQuotes', 'manageEmployees', 'manageTeam', 'manageRoles'];
+function openRoleForm(existing) {
+  const isEdit = !!existing;
+  const color = isEdit ? existing.color : '#2f8f5b';
+  const fields = `
+    <div class="two">
+      <div class="field"><label for="name">Role name</label><input id="name" name="name" value="${isEdit ? esc(existing.name) : ''}" required></div>
+      <div class="field"><label for="color">Color</label><input id="color" name="color" type="color" value="${esc(color)}" style="padding:4px;height:42px"></div>
+    </div>
+    <div class="field"><label for="rank">Rank (authority — higher number outranks lower; 1–999, Admin is 900)</label>
+      <input id="rank" name="rank" type="number" min="1" max="999" value="${isEdit ? existing.rank : 500}" required></div>
+    <div class="field"><label>Permissions</label>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px 14px">
+      ${PERM_KEYS_CLIENT.map(k => `<label style="display:flex;align-items:center;gap:8px;font-weight:400;font-size:14px">
+        <input type="checkbox" class="perm-check" data-perm="${k}" ${isEdit && existing.permissions && existing.permissions[k] ? 'checked' : ''} style="width:auto">${esc(PERM_LABELS[k])}</label>`).join('')}
+      </div></div>`;
+  openForm(isEdit ? `Edit role — ${existing.name}` : 'New role', fields, isEdit ? 'Save changes' : 'Create role', async d => {
+    const permissions = {};
+    PERM_KEYS_CLIENT.forEach(k => { permissions[k] = !!document.querySelector(`.perm-check[data-perm="${k}"]`).checked; });
+    const payload = { name: d.name, color: d.color, rank: d.rank, permissions };
+    if (isEdit) {
+      const r = await api(`/roles/${encodeURIComponent(existing._id)}`, 'PATCH', payload);
+      toast(`${r.role.name} updated`);
+    } else {
+      const r = await api('/roles', 'POST', payload);
+      toast(`Role ${r.role.name} created`);
+    }
+    viewTeam();
   });
 }
 
@@ -1956,6 +2122,60 @@ function renderQuotes() {
   paintIcons($('#view'));
 }
 
+/* ---- quotation line items: pick a product (optional) or type a custom line, price always manual ---- */
+function wireQuoteItems(root, initialItems) {
+  const wrap = root.querySelector('#qItems');
+  const hidden = root.querySelector('#Items');
+  const totalEl = root.querySelector('#qTotal');
+
+  function sync() {
+    let total = 0;
+    const list = [...wrap.querySelectorAll('.qitem')].map(div => {
+      const qty = Number(div.querySelector('.qi-qty').value) || 1;
+      const price = Number(div.querySelector('.qi-price').value) || 0;
+      total += qty * price;
+      return { Product: div.querySelector('.qi-product').value || null, name: div.querySelector('.qi-name').value.trim(), qty, price };
+    });
+    hidden.value = JSON.stringify(list);
+    totalEl.textContent = money(total);
+  }
+
+  function addRow(item) {
+    const div = document.createElement('div');
+    div.className = 'qitem';
+    div.style.cssText = 'border:1px solid var(--line);border-radius:9px;padding:12px;margin-bottom:10px';
+    div.innerHTML = `
+      <div class="two">
+        <div class="field" style="margin-bottom:8px"><label>Product (optional)</label>
+          <select class="qi-product"><option value="">— Custom item —</option>${state.products.map(p => `<option value="${esc(p._id)}">${esc(p.name)}</option>`).join('')}</select></div>
+        <div class="field" style="margin-bottom:8px"><label>Item name</label><input class="qi-name" required></div>
+      </div>
+      <div class="two">
+        <div class="field" style="margin-bottom:0"><label>Qty</label><input class="qi-qty" type="number" min="1" step="1" value="1"></div>
+        <div class="field" style="margin-bottom:0"><label>Price (₹ each)</label><input class="qi-price" type="number" min="0" step="any" inputmode="decimal" required></div>
+      </div>
+      <button type="button" class="btn sm qi-remove" style="margin-top:10px">Remove item</button>`;
+    wrap.appendChild(div);
+    if (item) {
+      if (item.Product) div.querySelector('.qi-product').value = item.Product;
+      div.querySelector('.qi-name').value = item.name || '';
+      div.querySelector('.qi-qty').value = item.qty || 1;
+      div.querySelector('.qi-price').value = item.price != null ? item.price : '';
+    }
+    div.querySelector('.qi-product').onchange = e => {
+      const p = state.products.find(x => x._id === e.target.value);
+      if (p && !div.querySelector('.qi-name').value) div.querySelector('.qi-name').value = p.name;
+      sync();
+    };
+    div.querySelector('.qi-remove').onclick = () => { div.remove(); if (!wrap.children.length) addRow(); sync(); };
+    div.querySelectorAll('.qi-qty, .qi-name, .qi-price').forEach(inp => inp.addEventListener('input', sync));
+  }
+
+  (initialItems && initialItems.length ? initialItems : [null]).forEach(addRow);
+  sync();
+  root.querySelector('#qAddItem').onclick = () => { addRow(); sync(); };
+}
+
 function openQuoteForm(existing) {
   const isEdit = !!existing;
   const fields = `
@@ -1968,11 +2188,14 @@ function openQuoteForm(existing) {
       <div class="field"><label for="ProspectName">Prospect name</label><input id="ProspectName" name="ProspectName"></div>
       ${phoneField('ProspectPhone', 'Phone', '')}
     </div>`}
-    <div class="field"><label for="Description">What's being quoted</label><input id="Description" name="Description" value="${isEdit ? esc(existing.Description || '') : ''}" required></div>
-    <div class="two">
-      <div class="field"><label for="Amount">Amount (₹)</label><input id="Amount" name="Amount" type="number" min="0" step="any" inputmode="decimal" value="${isEdit ? existing.Amount : ''}" required></div>
-      <div class="field"><label for="ValidUntil">Valid until</label><input id="ValidUntil" name="ValidUntil" type="date" value="${isEdit ? esc(existing.ValidUntil || '') : addDays(14)}"></div>
-    </div>`;
+    <div class="field"><label>Items</label>
+      <div id="qItems"></div>
+      <button type="button" class="btn sm" id="qAddItem"><span data-icon="plus"></span>Add item</button>
+    </div>
+    <div class="field"><label for="Description">Notes (optional)</label><input id="Description" name="Description" value="${isEdit ? esc(existing.Description || '') : ''}"></div>
+    <div class="field"><label for="ValidUntil">Valid until</label><input id="ValidUntil" name="ValidUntil" type="date" value="${isEdit ? esc(existing.ValidUntil || '') : addDays(14)}"></div>
+    <div class="field" style="margin-bottom:0;text-align:right"><b>Total: <span id="qTotal">₹0</span></b></div>
+    <input type="hidden" id="Items" name="Items" value="">`;
   openForm(isEdit ? `Edit ${existing.QuoteID}` : 'New quotation', fields, isEdit ? 'Save changes' : 'Create quotation', async d => {
     if (isEdit) {
       const r = await api(`/quotes/${encodeURIComponent(existing._id)}`, 'PATCH', d);
@@ -1986,11 +2209,15 @@ function openQuoteForm(existing) {
       state.quotes.unshift(r.quote);
     }
     renderQuotes();
-  }, isEdit ? null : () => {
-    const sel = $('#Client'), pf = $('#prospectFields');
-    const upd = () => pf.style.display = sel.value ? 'none' : '';
-    sel.onchange = upd; upd();
-    wirePhoneInputs($('#f'));
+  }, () => {
+    if (!isEdit) {
+      const sel = $('#Client'), pf = $('#prospectFields');
+      const upd = () => pf.style.display = sel.value ? 'none' : '';
+      sel.onchange = upd; upd();
+      wirePhoneInputs($('#f'));
+    }
+    wireQuoteItems($('#f'), isEdit ? existing.Items : null);
+    paintIcons($('#f'));
   });
 }
 
@@ -1999,12 +2226,16 @@ function openQuoteActions(id) {
   if (!q) return;
   const dlg = $('#dlg');
   const converted = q.Status === 'Converted';
+  const itemCount = (q.Items || []).length;
+  const phone = q.Client ? (state.clients.find(c => c._id === q.Client) || {}).Phone : q.ProspectPhone;
   dlg.innerHTML = `<h2>${esc(q.QuoteID)}</h2>
-    <p class="muted" style="margin-top:-14px;margin-bottom:18px">${esc(quoteName(q))} · ${money(q.Amount)}</p>
+    <p class="muted" style="margin-top:-14px;margin-bottom:18px">${esc(quoteName(q))} · ${itemCount} item${itemCount === 1 ? '' : 's'} · ${money(q.Amount)}</p>
     ${!converted ? `<div class="field"><label for="qStatus">Status</label>
       <select id="qStatus">${QUOTE_STATUSES.map(s => `<option value="${s}" ${q.Status === s ? 'selected' : ''}>${s}</option>`).join('')}</select></div>` : ''}
     <div class="sheet" style="margin-top:4px">
+      ${!converted && phone ? `<button type="button" class="sheet-item" id="sendBtn">Send to client (WhatsApp)</button>` : ''}
       <button type="button" class="sheet-item" id="printBtn">Print / share quotation</button>
+      <button type="button" class="sheet-item" id="histBtn">Edit history</button>
       ${!converted ? `<button type="button" class="sheet-item" id="editBtn">Edit quotation</button>
       <button type="button" class="sheet-item" id="convBtn">Convert to order</button>` : ''}
       <button type="button" class="sheet-item danger" id="delBtn">Delete quotation</button>
@@ -2012,7 +2243,9 @@ function openQuoteActions(id) {
     <div class="actions"><button type="button" class="btn" id="cancel">Close</button></div>`;
   $('#cancel').onclick = () => dlg.close();
   $('#printBtn').onclick = () => { dlg.close(); printQuote(q); };
+  $('#histBtn').onclick = () => { dlg.close(); openQuoteHistory(q); };
   $('#delBtn').onclick = () => { dlg.close(); deleteQuote(q); };
+  const sendBtn = $('#sendBtn'); if (sendBtn) sendBtn.onclick = () => { dlg.close(); sendQuoteToClient(q, phone); };
   const editBtn = $('#editBtn'); if (editBtn) editBtn.onclick = () => { dlg.close(); openQuoteForm(q); };
   const convBtn = $('#convBtn'); if (convBtn) convBtn.onclick = () => { dlg.close(); convertQuote(q); };
   const statusSel = $('#qStatus');
@@ -2029,6 +2262,34 @@ function openQuoteActions(id) {
     } catch (err) { toast(err.message); e.target.value = q.Status; }
   };
   dlg.showModal();
+}
+
+function openQuoteHistory(q) {
+  const dlg = $('#dlg');
+  const hist = (q.History || []).slice().reverse();
+  dlg.innerHTML = `<h2>History — ${esc(q.QuoteID)}</h2>
+    ${hist.length ? `<div class="timeline">${hist.map(h => `
+      <div class="ev"><span class="dot2"></span><div class="body"><b>${esc(h.event)}</b>${h.detail ? `<div>${esc(h.detail)}</div>` : ''}<small>${fmtDateTime(h.date)}</small></div></div>`).join('')}</div>`
+      : '<p class="muted">No history recorded yet.</p>'}
+    <div class="actions"><button type="button" class="btn" id="cancel">Close</button></div>`;
+  $('#cancel').onclick = () => dlg.close();
+  dlg.showModal();
+}
+
+/* ---- send the quotation to the client/prospect on WhatsApp, and log it ---- */
+async function sendQuoteToClient(q, phone) {
+  if (!phone) { toast('No phone number on file for this quotation'); return; }
+  const items = q.Items || [];
+  const lines = items.map(it => `• ${it.name}${it.qty > 1 ? ` x${it.qty}` : ''} — ${money(it.price * it.qty)}`).join('\n');
+  const msg = `Hi ${quoteName(q)}, here's your quotation ${q.QuoteID} from Primova:\n${lines}\n\nTotal: ${money(q.Amount)}${q.ValidUntil ? `\nValid until: ${fmtDate(q.ValidUntil)}` : ''}\n\nThank you!`;
+  window.open(waLink(phone, msg), '_blank');
+  try {
+    const r = await api(`/quotes/${encodeURIComponent(q._id)}/send`, 'POST');
+    const i = state.quotes.findIndex(x => x._id === r.quote._id);
+    if (i > -1) state.quotes[i] = r.quote;
+    toast(`${q.QuoteID} marked as sent`);
+    renderQuotes();
+  } catch (err) { toast(err.message); }
 }
 
 function convertQuote(q) {
@@ -2065,6 +2326,7 @@ function deleteQuote(q) {
 }
 
 function printQuote(q) {
+  const items = q.Items && q.Items.length ? q.Items : (q.Description ? [{ name: q.Description, qty: 1, price: q.Amount }] : []);
   const html = `
     <div class="inv">
       <div class="inv-head">
@@ -2076,10 +2338,11 @@ function printQuote(q) {
         <div><b>Valid until</b><p>${q.ValidUntil ? fmtDate(q.ValidUntil) : 'Not specified'}</p></div>
       </div>
       <table class="inv-table">
-        <thead><tr><th>Description</th><th class="num">Amount</th></tr></thead>
-        <tbody><tr><td>${esc(q.Description)}</td><td class="num">${money(q.Amount)}</td></tr></tbody>
-        <tfoot><tr class="strong"><td>Total quoted</td><td class="num">${money(q.Amount)}</td></tr></tfoot>
+        <thead><tr><th>Item</th><th class="num">Qty</th><th class="num">Price</th><th class="num">Amount</th></tr></thead>
+        <tbody>${items.map(it => `<tr><td>${esc(it.name)}</td><td class="num">${it.qty}</td><td class="num">${money(it.price)}</td><td class="num">${money(it.price * it.qty)}</td></tr>`).join('')}</tbody>
+        <tfoot><tr class="strong"><td colspan="3">Total quoted</td><td class="num">${money(q.Amount)}</td></tr></tfoot>
       </table>
+      ${q.Description ? `<p class="muted" style="margin-top:12px">${esc(q.Description)}</p>` : ''}
       <p class="inv-status">This is a quotation, not a bill. Prices may change after this date.</p>
       <p class="inv-foot">Thank you for considering Primova</p>
     </div>`;
