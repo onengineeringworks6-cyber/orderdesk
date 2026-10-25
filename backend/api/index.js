@@ -498,16 +498,38 @@ const orders = mongoose.model("Orders", {
   }
 });
 
-// One shared 6-step roadmap for every order type (v1 change — used to vary
-// by type, now unified at the user's request). Keep in sync with STAGES
-// on the frontend.
+// Default 6-step roadmap, used to seed every order type and as a fallback
+// if a roadmap document is somehow missing. Each order type's actual
+// roadmap (customizable by an admin) lives in the Roadmap collection below.
 const STAGES = ["Raw material", "Processing", "Completion of order", "To be delivered", "Delivered", "Money received"];
+const ORDER_TYPES_LIST = ["New Order", "Labour Job", "Repairing", "Trading"];
+
+const roadmap = mongoose.model("Roadmap", new mongoose.Schema({
+  OrderType: { type: String, required: true, unique: true },
+  stages: { type: [String], required: true }
+}));
+
+async function ensureRoadmaps() {
+  for (const t of ORDER_TYPES_LIST) {
+    if (!(await roadmap.findOne({ OrderType: t }))) {
+      await new roadmap({ OrderType: t, stages: STAGES.slice() }).save();
+    }
+  }
+}
+ensureRoadmaps().catch(err => console.error("Could not seed roadmaps:", err.message));
+
+// Looks up the actual (possibly customized) stage list for an order type.
+async function stagesForType(orderType) {
+  const r = await roadmap.findOne({ OrderType: orderType });
+  return (r && r.stages && r.stages.length) ? r.stages : STAGES;
+}
 
 // Moves an order to its closed-out state: Closed if fully paid, otherwise
 // "Payment Due" so unpaid work never silently disappears into Closed.
 // markPaidIfDue only applies when explicitly requested (the "mark as paid"
 // checkbox) — reaching the last stage on its own never fabricates a payment.
-function applyClose(order, markPaidIfDue) {
+// maxStage is that order's own (possibly customized) roadmap length.
+function applyClose(order, markPaidIfDue, maxStage) {
   if (order.RemainingPayment > 0 && markPaidIfDue) {
     const paid = order.RemainingPayment;
     const nowDate = new Date().toISOString();
@@ -520,7 +542,7 @@ function applyClose(order, markPaidIfDue) {
     return "Production complete — payment still due, marked Payment Due";
   }
   order.Status = "Closed";
-  order.Stage = STAGES.length;
+  order.Stage = maxStage || STAGES.length;
   return "Order closed — all stages complete and payment received";
 }
 
@@ -804,7 +826,8 @@ app.patch('/orders/:id/status', async (req, res) => {
     if (Status === "Closed") {
       // Closing is conditional on payment: applyClose downgrades to
       // "Payment Due" by itself if the balance isn't actually zero.
-      detail = applyClose(order, markPaid && req.user.role === "admin");
+      const stages = await stagesForType(order.OrderType);
+      detail = applyClose(order, markPaid && req.user.role === "admin", stages.length);
     } else if (Status === "Payment Due") {
       order.Status = "Payment Due";
       detail = "Marked Payment Due";
@@ -899,8 +922,8 @@ app.delete('/orders/:id/expenses/:expenseId', requireAdmin, async (req, res) => 
   }
 });
 
-// UPDATE ORDER STAGE — the number of valid steps depends on OrderType
-// (see STAGES above).
+// UPDATE ORDER STAGE — the number of valid steps, and their labels, come
+// from that order's own (possibly customized) roadmap.
 app.patch('/orders/:id/stage', async (req, res) => {
   try {
     const order = await orders.findById(req.params.id);
@@ -908,20 +931,21 @@ app.patch('/orders/:id/stage', async (req, res) => {
       return res.status(404).json({ message: "Order not found" });
     }
 
+    const stages = await stagesForType(order.OrderType);
     const step = Number(req.body.Stage);
-    const maxStage = STAGES.length;
+    const maxStage = stages.length;
 
     if (!Number.isInteger(step) || step < 1 || step > maxStage) {
       return res.status(400).json({ message: `Stage must be between 1 and ${maxStage}` });
     }
 
     order.Stage = step;
-    let detail = `Moved to step ${step} of ${maxStage}: ${STAGES[step - 1]}`;
-    // Reaching the last stage ("Money received") closes the order out by
-    // default — Closed if paid, Payment Due if not. Never fabricates a
-    // payment on its own; that only happens via the explicit checkbox.
+    let detail = `Moved to step ${step} of ${maxStage}: ${stages[step - 1]}`;
+    // Reaching the last stage closes the order out by default — Closed if
+    // paid, Payment Due if not. Never fabricates a payment on its own;
+    // that only happens via the explicit checkbox.
     if (step === maxStage && order.Status !== "Closed") {
-      detail += ` · ${applyClose(order, false)}`;
+      detail += ` · ${applyClose(order, false, maxStage)}`;
     }
     order.History.push({ event: "Stage", detail, date: new Date().toISOString() });
     await order.save();
@@ -929,6 +953,58 @@ app.patch('/orders/:id/stage', async (req, res) => {
     res.status(200).json({ message: "Stage updated", order: forRole(req, order) });
   } catch (error) {
     res.status(500).json({ message: "Error updating stage", error: error.message });
+  }
+});
+
+//..........................ROADMAPS (per order type, customizable)........
+// GET all 4 order types' stage lists at once.
+app.get("/roadmaps", async (req, res) => {
+  try {
+    const all = await roadmap.find({});
+    const map = {};
+    all.forEach(r => { map[r.OrderType] = r.stages; });
+    ORDER_TYPES_LIST.forEach(t => { if (!map[t]) map[t] = STAGES; });
+    res.status(200).json(map);
+  } catch (error) {
+    res.status(500).json({ message: "Error fetching roadmaps", error: error.message });
+  }
+});
+
+// EDIT ONE ORDER TYPE'S ROADMAP (admin only). If the new list is shorter
+// than before, any order of that type sitting past the new last stage is
+// pulled back to the new last stage, so nothing points at a stage that no
+// longer exists.
+app.patch("/roadmaps/:orderType", requireAdmin, async (req, res) => {
+  try {
+    const orderType = req.params.orderType;
+    if (!ORDER_TYPES_LIST.includes(orderType)) {
+      return res.status(400).json({ message: "Unknown order type" });
+    }
+    const raw = req.body.stages;
+    if (!Array.isArray(raw)) {
+      return res.status(400).json({ message: "Stages must be a list" });
+    }
+    const cleaned = raw.map(s => String(s || "").trim()).filter(Boolean);
+    if (!cleaned.length) {
+      return res.status(400).json({ message: "Add at least one stage" });
+    }
+    if (cleaned.length > 20) {
+      return res.status(400).json({ message: "Keep it to 20 stages or fewer" });
+    }
+
+    let r = await roadmap.findOne({ OrderType: orderType });
+    if (!r) r = new roadmap({ OrderType: orderType, stages: cleaned });
+    else r.stages = cleaned;
+    await r.save();
+
+    await orders.updateMany(
+      { OrderType: orderType, Stage: { $gt: cleaned.length } },
+      { Stage: cleaned.length }
+    );
+
+    res.status(200).json({ message: `${orderType} roadmap updated`, roadmap: r });
+  } catch (error) {
+    res.status(500).json({ message: "Error updating roadmap", error: error.message });
   }
 });
 

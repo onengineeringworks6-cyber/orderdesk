@@ -551,7 +551,7 @@ async function api(path, method = 'GET', body) {
 }
 
 /* ---------- state ---------- */
-const state = { view: 'dashboard', role: 'admin', orders: [], clients: [], products: [], deletedOrders: [], deletedClients: [], team: [], quotes: [], employees: [], attendance: [], attMonth: today().slice(0, 7), filter: 'All', q: '' };
+const state = { view: 'dashboard', role: 'admin', orders: [], clients: [], products: [], deletedOrders: [], deletedClients: [], team: [], quotes: [], employees: [], attendance: [], attMonth: today().slice(0, 7), filter: 'Active', typeFilter: 'All', roadmaps: {}, q: '' };
 const clientName = id => (state.clients.find(c => c._id === id) || {}).name || 'Unknown client';
 const productName = id => (state.products.find(p => p._id === id) || {}).name || '';
 const orderProfit = o => (o.TotalValue || 0) - (o.PurchaseCost || 0) - sum(o.Expenses || [], 'amount');
@@ -706,8 +706,10 @@ async function loadAll() {
 const ADMIN_ONLY_VIEWS = ['trash', 'team', 'quotes', 'employees'];
 function go(view) {
   if (ADMIN_ONLY_VIEWS.includes(view) && state.role !== 'admin') view = 'dashboard';
-  state.view = view; state.q = ''; state.filter = 'All';
-  if (view === 'orders' && state.role !== 'admin') state.filter = 'My jobs';
+  state.view = view; state.q = ''; state.filter = 'All'; state.typeFilter = 'All';
+  // Orders opens to Active by default (My jobs for workers) — closed/other
+  // orders are a tap away, not the first thing you see.
+  if (view === 'orders') state.filter = state.role === 'admin' ? 'Active' : 'My jobs';
   document.body.classList.remove('nav-open');
   render(); window.scrollTo(0, 0);
 }
@@ -861,6 +863,7 @@ function idFromToken() {
 }
 const myId = () => localStorage.getItem('odUserId') || idFromToken();
 function matchesFilter(x) {
+  if (state.typeFilter && state.typeFilter !== 'All' && x.OrderType !== state.typeFilter) return false;
   switch (state.filter) {
     case 'All': return true;
     case 'Due': return x.RemainingPayment > 0;
