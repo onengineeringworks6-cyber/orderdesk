@@ -163,6 +163,8 @@
   .chart svg { width: 100%; height: auto; display: block; }
   .bar { fill: var(--green-mid); }
   .bar.now { fill: var(--green); }
+  .bar.rev { fill: #1f7a8c; }
+  .bar.rev.now { fill: #15616f; }
   .chart text { font: 12px var(--font); fill: var(--muted); }
   .chart text.v { fill: var(--ink); font-weight: 500; }
   .donut-wrap { display: flex; align-items: center; gap: 22px; flex-wrap: wrap; }
@@ -341,6 +343,8 @@
   /* ---------- invoice / receipt (only shown for printing) ---------- */
   .print-only { display: none; }
   .inv { font-family: inherit; color: #111; padding: 24px; max-width: 700px; margin: 0 auto; background: #fff; }
+  .inv.report { max-width: 920px; }
+  .inv.report h3 { font-size: 14px; }
   .inv-head { display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 2px solid #111; padding-bottom: 12px; margin-bottom: 18px; }
   .inv-head h1 { margin: 0; font-size: 22px; }
   .inv-head p { margin: 2px 0 0; font-size: 12px; color: #555; }
@@ -561,14 +565,18 @@ const statusPill = s => {
   return `<span class="pill ${cls}">${esc(s)}</span>`;
 };
 
-/* v1: one shared 6-step roadmap for every order type (used to vary by type). */
+/* Each order type has its own roadmap (customizable by an admin from the
+   Orders page). STAGES below is only the default/fallback list, used until
+   state.roadmaps loads or for a type with no saved roadmap yet. */
 const ORDER_TYPES = ['New Order', 'Labour Job', 'Repairing', 'Trading'];
 const STAGES = ['Raw material', 'Processing', 'Completion of order', 'To be delivered', 'Delivered', 'Money received'];
+const stagesFor = orderType => (state.roadmaps && state.roadmaps[orderType] && state.roadmaps[orderType].length) ? state.roadmaps[orderType] : STAGES;
 const TYPE_SHORT = { 'New Order': 'New', 'Labour Job': 'Labour', 'Repairing': 'Repair', 'Trading': 'Trading' };
 const typePill = t => `<span class="pill type-${(TYPE_SHORT[t] || 'New').toLowerCase()}">${esc(TYPE_SHORT[t] || 'New')}</span>`;
 const orderTitle = o => o.OrderName && o.OrderName !== o.OrderID ? o.OrderName : o.OrderID;
-function stageDots(stage) {
-  const n = STAGES.length;
+function stageDots(stage, orderType) {
+  const labels = stagesFor(orderType);
+  const n = labels.length;
   stage = Math.min(stage || 1, n);
   const parts = Array.from({ length: n }, (_, idx) => {
     const i = idx + 1;
@@ -576,8 +584,8 @@ function stageDots(stage) {
     const ln = idx < n - 1 ? `<span class="ln${i < stage ? ' on' : ''}"></span>` : '';
     return dot + ln;
   }).join('');
-  return `<div class="cellc" title="${esc(STAGES[stage - 1])} (step ${stage} of ${n})">
-    <div class="stage-dots">${parts}</div><span class="stage-label">${esc(STAGES[stage - 1])}</span></div>`;
+  return `<div class="cellc" title="${esc(labels[stage - 1])} (step ${stage} of ${n})">
+    <div class="stage-dots">${parts}</div><span class="stage-label">${esc(labels[stage - 1])}</span></div>`;
 }
 
 /* ---------- derived data (always computed fresh from state.orders,
@@ -679,16 +687,18 @@ function showApp() {
 async function loadAll() {
   $('#view').innerHTML = '<p class="muted">Loading…</p>';
   try {
-    const [orders, clients, products, team, roles] = await Promise.all([
+    const [orders, clients, products, team, roles, roadmaps] = await Promise.all([
       api('/orders'), api('/allclients'), api('/products'),
       state.role === 'admin' ? api('/team') : Promise.resolve([]),
-      api('/roles').catch(() => [])
+      api('/roles').catch(() => []),
+      api('/roadmaps').catch(() => ({}))
     ]);
     state.orders = orders.slice().reverse();
     state.clients = clients;
     state.products = products;
     state.team = team;
     state.roles = roles;
+    state.roadmaps = roadmaps;
     render();
     if (pendingOrderId) {
       const id = pendingOrderId; pendingOrderId = null;
@@ -767,18 +777,21 @@ function viewDashboard() {
   $('#view').innerHTML = `
     <div class="head">
       <div><h1 class="title">${greet}, ${esc(name)}</h1><p>${new Date().toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}</p></div>
-      ${isAdmin ? `<button class="btn primary" id="add"><span data-icon="plus"></span>New order</button>` : ''}
+      ${isAdmin ? `<div style="display:flex;gap:8px"><button class="btn" id="fullReport"><span data-icon="download"></span>Full report (PDF)</button>
+      <button class="btn primary" id="add"><span data-icon="plus"></span>New order</button></div>` : ''}
     </div>
 
     <div class="stats">
       <div class="card stat hero"><div class="ic" data-icon="orders"></div><span class="l">Active orders</span><strong>${active.length}</strong><small>${overdue ? overdue + ' past delivery date' : 'All on schedule'}</small></div>
       ${isAdmin ? `<div class="card stat"><div class="ic" data-icon="wallet"></div><span class="l">Balance due</span><strong>${money(due)}</strong><small>Across ${o.filter(x => x.RemainingPayment > 0).length} orders</small></div>
+      <div class="card stat"><div class="ic" data-icon="trend"></div><span class="l">Revenue generated</span><strong>${money(totalRevenue())}</strong><small>Every advance &amp; payment received</small></div>
       <div class="card stat"><div class="ic" data-icon="trend"></div><span class="l">Total order value</span><strong>${money(total)}</strong><small>${o.length} orders in total</small></div>
       <div class="card stat"><div class="ic" data-icon="wallet"></div><span class="l">Estimated profit</span><strong>${money(o.reduce((t, x) => t + orderProfit(x), 0))}</strong><small>Total value minus cost &amp; expenses</small></div>` : `<div class="card stat"><div class="ic" data-icon="trend"></div><span class="l">My active jobs</span><strong>${active.filter(x => x.AssignedTo && x.AssignedTo === myId()).length}</strong><small>Assigned to you</small></div>`}
       <div class="card stat"><div class="ic" data-icon="clients"></div><span class="l">Clients</span><strong>${c.length}</strong><small>${state.products.length} products listed</small></div>
     </div>
 
-    ${isAdmin ? `<div class="grid2">
+    ${isAdmin ? `<div class="card" style="margin-bottom:16px"><div class="card-head"><h3>Revenue generated</h3><span class="muted" style="font-size:13px">Last 6 months · grows with every advance and payment received</span></div>${revenueChart()}</div>
+    <div class="grid2">
       <div class="card chart"><div class="card-head"><h3>Order value by month</h3><span class="muted" style="font-size:13px">Last 6 months</span></div>${monthChart()}</div>
       <div class="card"><div class="card-head"><h3>Payments</h3></div>
         <div class="donut-wrap">
@@ -823,6 +836,7 @@ function viewDashboard() {
           <td>${statusPill(x.Status)}</td><td>${stageDots(x.Stage, x.OrderType)}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty"><p>No orders yet.</p></div>'}
     </div>`;
   const addBtn = $('#add'); if (addBtn) addBtn.onclick = openOrderForm;
+  const reportBtn = $('#fullReport'); if (reportBtn) reportBtn.onclick = printFullReport;
 }
 function dueBadge(x, t0) {
   const d = ts(x.DeliveryDate);
@@ -855,6 +869,37 @@ function monthChart() {
         <text x="${x + bw / 2}" y="${H - 8}" text-anchor="middle">${k.label}</text>`;
     }).join('')}</svg>`;
 }
+// Actual money collected (every advance payment and "marked as paid" close
+// — i.e. every AdvanceHistory entry, across every order), not booked order
+// value. Grows every time a payment lands, whether that's an advance on a
+// new order or the final payment that closes one out.
+function totalRevenue() {
+  return state.orders.reduce((t, x) => t + sum(x.AdvanceHistory || [], 'amount'), 0);
+}
+function revenueChart() {
+  const now = new Date(), months = [];
+  for (let i = 5; i >= 0; i--) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    months.push({ y: d.getFullYear(), m: d.getMonth(), label: d.toLocaleDateString('en-IN', { month: 'short' }), v: 0 });
+  }
+  state.orders.forEach(x => {
+    (x.AdvanceHistory || []).forEach(a => {
+      const d = parseDate(a.date); if (isNaN(d)) return;
+      const slot = months.find(k => k.y === d.getFullYear() && k.m === d.getMonth());
+      if (slot) slot.v += Number(a.amount) || 0;
+    });
+  });
+  const max = Math.max(...months.map(k => k.v), 1);
+  if (!months.some(k => k.v > 0)) return '<div class="empty sm">Revenue will appear here once a payment or advance is recorded.</div>';
+  const W = 480, H = 210, top = 24, bottom = 28, slotW = W / 6, bw = 40, ch = H - top - bottom;
+  return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Revenue collected over the last six months">
+    <line x1="0" x2="${W}" y1="${H - bottom}" y2="${H - bottom}" stroke="#e1e7e3"/>
+    ${months.map((k, i) => {
+      const h = k.v ? Math.max(k.v / max * ch, 4) : 0, x = i * slotW + (slotW - bw) / 2, y = H - bottom - h;
+      return `${k.v ? `<rect class="bar rev ${i === 5 ? 'now' : ''}" x="${x}" y="${y}" width="${bw}" height="${h}" rx="6"/><text class="v" x="${x + bw / 2}" y="${y - 7}" text-anchor="middle">₹${compact(k.v)}</text>` : ''}
+        <text x="${x + bw / 2}" y="${H - 8}" text-anchor="middle">${k.label}</text>`;
+    }).join('')}</svg>`;
+}
 
 /* ================= ORDERS ================= */
 function idFromToken() {
@@ -881,10 +926,13 @@ function filteredOrders() {
 function viewOrders() {
   const isAdmin = state.role === 'admin';
   const o = state.orders;
+  const typeCount = t => o.filter(x => x.OrderType === t).length;
   $('#view').innerHTML = `
     <div class="head"><div><h1 class="title">Orders</h1><p>${o.length} total, ${o.filter(x => x.Status === 'Active').length} active</p></div>
-      <div style="display:flex;gap:8px">${isAdmin ? `<button class="btn" id="export"><span data-icon="download"></span>Export CSV</button>
+      <div style="display:flex;gap:8px">${isAdmin ? `<button class="btn" id="roadmapBtn">Manage roadmap</button>
+      <button class="btn" id="export"><span data-icon="download"></span>Export CSV</button>
       <button class="btn primary" id="add"><span data-icon="plus"></span>New order</button>` : ''}</div></div>
+    <div class="seg" id="typeSeg" style="margin-bottom:10px">${['All', ...ORDER_TYPES].map(t => `<button data-t="${esc(t)}" aria-pressed="${state.typeFilter === t}">${t === 'All' ? `All (${o.length})` : `${esc(t)} (${typeCount(t)})`}</button>`).join('')}</div>
     <div class="toolbar">
       <input type="search" id="q" placeholder="Search by order name, ID or client" aria-label="Search orders" value="${esc(state.q)}">
       <div class="seg" id="seg">${(isAdmin ? ['All', 'Active', 'Payment Due', 'Closed', 'Due', 'Unassigned'] : ['My jobs', 'All', 'Active', 'Payment Due', 'Closed']).map(f => `<button data-f="${f}" aria-pressed="${state.filter === f}">${f}</button>`).join('')}</div>
@@ -892,6 +940,7 @@ function viewOrders() {
     <div id="list"></div>`;
   const addBtn = $('#add'); if (addBtn) addBtn.onclick = openOrderForm;
   const exportBtn = $('#export'); if (exportBtn) exportBtn.onclick = () => exportOrdersCSV(filteredOrders());
+  const roadmapBtn = $('#roadmapBtn'); if (roadmapBtn) roadmapBtn.onclick = openRoadmapManager;
   $('#q').oninput = e => { state.q = e.target.value; ordersTable(); };
   $('#list').onclick = e => {
     const remind = e.target.closest('[data-remind-order]');
@@ -902,6 +951,14 @@ function viewOrders() {
     const b = e.target.closest('button'); if (!b) return;
     state.filter = b.dataset.f;
     document.querySelectorAll('#seg button').forEach(x => x.setAttribute('aria-pressed', x === b));
+    ordersTable();
+  };
+  // Order-type tabs: "All" is the parent page (everything, as before);
+  // each type is its own child page, filtered down to just that type.
+  $('#typeSeg').onclick = e => {
+    const b = e.target.closest('button'); if (!b) return;
+    state.typeFilter = b.dataset.t;
+    document.querySelectorAll('#typeSeg button').forEach(x => x.setAttribute('aria-pressed', x === b));
     ordersTable();
   };
   ordersTable();
@@ -981,10 +1038,19 @@ async function downloadCSV(content, filename) {
     } catch (e) { if (e && e.name === 'AbortError') return 'cancelled'; }
   }
   const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url; a.download = filename;
-  document.body.appendChild(a); a.click(); document.body.removeChild(a);
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  // A plain <a download> click often does nothing visible inside an
+  // embedded Android WebView (e.g. the installed app, before a share
+  // sheet is available) — no error, no file, nothing in Downloads.
+  // Opening the blob as a navigation instead lets the system handle it.
+  const isEmbeddedWebView = /; wv\)/i.test(navigator.userAgent) || (/Android/i.test(navigator.userAgent) && !/Version\/[\d.]+ Chrome/i.test(navigator.userAgent) && !/\bChrome\/[\d.]+ Mobile\b/i.test(navigator.userAgent));
+  if (isEmbeddedWebView) {
+    window.open(url, '_blank');
+  } else {
+    const a = document.createElement('a');
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  }
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
   return 'downloaded';
 }
 async function exportOrdersCSV(rows) {
@@ -1007,7 +1073,7 @@ async function exportOrdersCSV(rows) {
     { label: 'Expenses', get: o => sum(o.Expenses || [], 'amount') || '' },
     { label: 'Profit', get: o => orderProfit(o) },
     { label: 'Status', get: o => o.Status },
-    { label: 'Stage', get: o => `${o.Stage || 1} of ${STAGES.length} — ${STAGES[(o.Stage || 1) - 1]}` }
+    { label: 'Stage', get: o => `${o.Stage || 1} of ${stagesFor(o.OrderType).length} — ${stagesFor(o.OrderType)[(o.Stage || 1) - 1]}` }
   ];
   const result = await downloadCSV(toCSV(rows, headers), `orders-${today()}.csv`);
   const n = `${rows.length} order${rows.length === 1 ? '' : 's'}`;
@@ -1028,6 +1094,79 @@ async function exportClientsCSV(rows) {
   const n = `${rows.length} client${rows.length === 1 ? '' : 's'}`;
   if (result === 'shared') toast(`${n} shared`);
   else if (result === 'downloaded') toast(`${n} exported — check your device's Downloads if you don't see it`);
+}
+
+/* ---- full business report: dashboard charts + every order/client/quote/employee, as a printable PDF ---- */
+async function printFullReport() {
+  toast('Preparing report…');
+  try {
+    const [quotes, employees] = await Promise.all([
+      api('/quotes').catch(() => state.quotes || []),
+      api('/employees').catch(() => state.employees || [])
+    ]);
+    state.quotes = quotes;
+    state.employees = employees;
+  } catch { /* fall back to whatever's already in state */ }
+
+  const o = state.orders, c = state.clients, q = state.quotes || [], emps = state.employees || [];
+  const total = sum(o, 'TotalValue'), due = sum(o, 'RemainingPayment'), collected = Math.max(total - due, 0);
+  const profit = o.reduce((t, x) => t + orderProfit(x), 0);
+  const active = o.filter(x => x.Status === 'Active').length;
+  const closed = o.filter(x => x.Status === 'Closed').length;
+  const paymentDue = o.filter(x => x.Status === 'Payment Due').length;
+
+  const html = `
+    <div class="inv report">
+      <div class="inv-head">
+        <div><h1>Primova</h1><p>Prime Solutions. Real Results.</p></div>
+        <div class="inv-meta"><h2>Full Business Report</h2><p>${new Date().toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}</p></div>
+      </div>
+
+      <h3>Overview</h3>
+      <table class="inv-table"><tbody>
+        <tr><td>Revenue generated (every advance &amp; payment received)</td><td class="num">${money(totalRevenue())}</td></tr>
+        <tr><td>Total order value</td><td class="num">${money(total)}</td></tr>
+        <tr><td>Collected</td><td class="num">${money(collected)}</td></tr>
+        <tr><td>Balance due</td><td class="num">${money(due)}</td></tr>
+        <tr><td>Estimated profit</td><td class="num">${money(profit)}</td></tr>
+        <tr><td>Orders — Active / Payment Due / Closed</td><td class="num">${active} / ${paymentDue} / ${closed}</td></tr>
+        <tr><td>Clients</td><td class="num">${c.length}</td></tr>
+      </tbody></table>
+
+      <h3>Revenue — last 6 months</h3>
+      ${revenueChart()}
+
+      <h3>Order value — last 6 months</h3>
+      ${monthChart()}
+
+      <h3>Orders (${o.length})</h3>
+      <table class="inv-table">
+        <thead><tr><th>Order</th><th>Client</th><th>Type</th><th>Status</th><th class="num">Total</th><th class="num">Advance</th><th class="num">Remaining</th><th>Delivery</th></tr></thead>
+        <tbody>${o.map(x => `<tr><td>${esc(orderTitle(x))}</td><td>${esc(clientName(x.Client))}</td><td>${esc(x.OrderType)}</td><td>${esc(x.Status)}</td><td class="num">${money(x.TotalValue)}</td><td class="num">${money(x.Advance)}</td><td class="num">${money(x.RemainingPayment)}</td><td>${fmtDate(x.DeliveryDate)}</td></tr>`).join('')}</tbody>
+      </table>
+
+      <h3>Clients (${c.length})</h3>
+      <table class="inv-table">
+        <thead><tr><th>Name</th><th>Phone</th><th class="num">Orders</th><th class="num">Active</th><th class="num">Balance due</th></tr></thead>
+        <tbody>${c.map(x => { const s = clientStats(x._id); return `<tr><td>${esc(x.name)}</td><td>${esc(x.Phone || '')}</td><td class="num">${s.TotalOrders}</td><td class="num">${s.ActiveOrders}</td><td class="num">${money(s.BalanceDue)}</td></tr>`; }).join('')}</tbody>
+      </table>
+
+      ${q.length ? `<h3>Quotations (${q.length})</h3>
+      <table class="inv-table">
+        <thead><tr><th>Quote</th><th>For</th><th class="num">Amount</th><th>Status</th></tr></thead>
+        <tbody>${q.map(x => `<tr><td>${esc(x.QuoteID)}</td><td>${esc(quoteName(x))}</td><td class="num">${money(x.Amount)}</td><td>${esc(x.Status)}</td></tr>`).join('')}</tbody>
+      </table>` : ''}
+
+      ${emps.length ? `<h3>Employees (${emps.length})</h3>
+      <table class="inv-table">
+        <thead><tr><th>Name</th><th>Role</th><th>Salary</th></tr></thead>
+        <tbody>${emps.map(x => `<tr><td>${esc(x.name)}</td><td>${esc(x.Role || '')}</td><td>${esc(salaryLabel(x))}</td></tr>`).join('')}</tbody>
+      </table>` : ''}
+
+      <p class="inv-foot">Generated by Order Desk — Primova</p>
+    </div>`;
+  $('#invoicePrint').innerHTML = html;
+  setTimeout(() => window.print(), 50);
 }
 
 function printStatement(c) {
@@ -1067,17 +1206,18 @@ function teamOptions(selectedId) {
 function sendStageUpdate(o) {
   const c = state.clients.find(x => x._id === o.Client);
   if (!c) { toast('Client not found'); return; }
-  const st = Math.min(o.Stage || 1, STAGES.length);
-  const msg = `Hi ${c.name}, an update on your order ${orderTitle(o)}: it is now at "${STAGES[st - 1]}" (step ${st} of ${STAGES.length}).${o.DeliveryDate ? ` Expected delivery: ${fmtDate(o.DeliveryDate)}.` : ''} Thank you! — Primova`;
+  const labels = stagesFor(o.OrderType);
+  const st = Math.min(o.Stage || 1, labels.length);
+  const msg = `Hi ${c.name}, an update on your order ${orderTitle(o)}: it is now at "${labels[st - 1]}" (step ${st} of ${labels.length}).${o.DeliveryDate ? ` Expected delivery: ${fmtDate(o.DeliveryDate)}.` : ''} Thank you! — Primova`;
   window.open(waLink(c.Phone, msg), '_blank');
 }
 function offerClientUpdate(o) {
   const c = state.clients.find(x => x._id === o.Client);
   if (!c) return;
-  const st = Math.min(o.Stage || 1, STAGES.length);
+  const st = Math.min(o.Stage || 1, stagesFor(o.OrderType).length);
   const dlg = $('#dlg');
   dlg.innerHTML = `<h2>Tell ${esc(c.name)}?</h2>
-    <p class="muted" style="margin-top:0">${esc(orderTitle(o))} is now at “${esc(STAGES[st - 1])}”. Send them a quick WhatsApp update.</p>
+    <p class="muted" style="margin-top:0">${esc(orderTitle(o))} is now at “${esc(stagesFor(o.OrderType)[st - 1])}”. Send them a quick WhatsApp update.</p>
     <div class="actions"><button type="button" class="btn" id="cancel">Not now</button>
       <button type="button" class="btn primary" id="sendUpd">Send on WhatsApp</button></div>`;
   $('#cancel').onclick = () => dlg.close();
@@ -1197,7 +1337,7 @@ function openOrderActions(id) {
       <div class="field"><label for="ordStatus">Status</label>
         <select id="ordStatus">${STATUSES.map(s => `<option value="${s}" ${o.Status === s ? 'selected' : ''}>${s}</option>`).join('')}</select></div>
       <div class="field"><label for="ordStage">Stage</label>
-        <select id="ordStage">${STAGES.map((label, i) => `<option value="${i + 1}" ${o.Stage === i + 1 ? 'selected' : ''}>${i + 1}. ${esc(label)}</option>`).join('')}</select></div>
+        <select id="ordStage">${stagesFor(o.OrderType).map((label, i) => `<option value="${i + 1}" ${o.Stage === i + 1 ? 'selected' : ''}>${i + 1}. ${esc(label)}</option>`).join('')}</select></div>
     </div>
     ${isAdmin ? `<div class="field"><label for="ordAssign">Assigned to</label><select id="ordAssign">${teamOptions(o.AssignedTo)}</select></div>` : ''}
     <div class="sheet" style="margin-top:4px">
@@ -1253,10 +1393,11 @@ function openOrderActions(id) {
     if (step === o.Stage) return;
     try {
       const r = await api(`/orders/${encodeURIComponent(o._id)}/stage`, 'PATCH', { Stage: step });
-      toast(`${orderTitle(o)} moved to "${STAGES[step - 1]}"${r.order.Status !== o.Status ? ` · now ${r.order.Status}` : ''}`);
+      const labels = stagesFor(o.OrderType);
+      toast(`${orderTitle(o)} moved to "${labels[step - 1]}"${r.order.Status !== o.Status ? ` · now ${r.order.Status}` : ''}`);
       dlg.close();
       patchOrder(r.order);
-      if (step >= STAGES.length - 1 && step < STAGES.length) offerClientUpdate(r.order);
+      if (step >= labels.length - 1 && step < labels.length) offerClientUpdate(r.order);
     } catch (err) { toast(err.message); e.target.value = o.Stage; }
   };
   dlg.showModal();
@@ -1315,6 +1456,56 @@ function deleteOrder(o) {
   api(`/orders/${encodeURIComponent(o._id)}`, 'DELETE')
     .then(() => { toast(`${orderTitle(o)} deleted`); removeOrder(o._id); })
     .catch(e => toast(e.message));
+}
+
+/* ---- customizable roadmap editor (admin only), per order type ---- */
+function openRoadmapManager() {
+  const dlg = $('#dlg');
+  let activeType = ORDER_TYPES[0];
+  const render = () => {
+    const stages = stagesFor(activeType).slice();
+    dlg.innerHTML = `<h2>Manage roadmap</h2>
+      <p class="muted" style="margin-top:-10px">Each order type has its own stages. Reorder, rename, add or remove them below.</p>
+      <div class="seg" id="rmType" style="margin-bottom:14px">${ORDER_TYPES.map(t => `<button data-t="${esc(t)}" aria-pressed="${t === activeType}">${esc(t)}</button>`).join('')}</div>
+      <div id="rmStages"></div>
+      <button type="button" class="btn sm" id="rmAdd" style="margin-top:4px"><span data-icon="plus"></span>Add stage</button>
+      <p class="err" id="rmErr" role="alert" style="margin-top:10px"></p>
+      <div class="actions"><button type="button" class="btn" id="cancel">Cancel</button><button type="button" class="btn primary" id="rmSave">Save roadmap</button></div>`;
+    const list = $('#rmStages');
+    const renderRows = () => {
+      list.innerHTML = stages.map((s, i) => `<div style="display:flex;gap:6px;align-items:center;margin-bottom:8px">
+        <span class="muted" style="width:20px;flex:none">${i + 1}.</span>
+        <input class="rm-input" data-i="${i}" value="${esc(s)}" style="flex:1">
+        <button type="button" class="btn sm rm-up" data-i="${i}" ${i === 0 ? 'disabled' : ''} title="Move up">↑</button>
+        <button type="button" class="btn sm rm-down" data-i="${i}" ${i === stages.length - 1 ? 'disabled' : ''} title="Move down">↓</button>
+        <button type="button" class="btn sm rm-del" data-i="${i}" ${stages.length <= 1 ? 'disabled' : ''} title="Remove">✕</button>
+      </div>`).join('');
+      list.querySelectorAll('.rm-input').forEach(inp => inp.oninput = e => { stages[+e.target.dataset.i] = e.target.value; });
+      list.querySelectorAll('.rm-up').forEach(b => b.onclick = () => { const i = +b.dataset.i; [stages[i - 1], stages[i]] = [stages[i], stages[i - 1]]; renderRows(); });
+      list.querySelectorAll('.rm-down').forEach(b => b.onclick = () => { const i = +b.dataset.i; [stages[i + 1], stages[i]] = [stages[i], stages[i + 1]]; renderRows(); });
+      list.querySelectorAll('.rm-del').forEach(b => b.onclick = () => { stages.splice(+b.dataset.i, 1); renderRows(); });
+    };
+    renderRows();
+    $('#rmType').onclick = e => { const b = e.target.closest('button'); if (!b) return; activeType = b.dataset.t; render(); };
+    $('#rmAdd').onclick = () => { stages.push('New step'); renderRows(); };
+    $('#cancel').onclick = () => dlg.close();
+    $('#rmSave').onclick = async () => {
+      const cleaned = stages.map(s => s.trim()).filter(Boolean);
+      if (!cleaned.length) { $('#rmErr').textContent = 'Add at least one stage.'; return; }
+      try {
+        const r = await api(`/roadmaps/${encodeURIComponent(activeType)}`, 'PATCH', { stages: cleaned });
+        state.roadmaps[activeType] = r.roadmap.stages;
+        toast(`${activeType} roadmap updated`);
+        dlg.close();
+        // Orders of this type past the new last stage were pulled back
+        // server-side — refresh so stage dots/selects match reality.
+        await loadAll();
+      } catch (err) { $('#rmErr').textContent = err.message; }
+    };
+    paintIcons(dlg);
+  };
+  render();
+  dlg.showModal();
 }
 
 function openOrderForm() {
