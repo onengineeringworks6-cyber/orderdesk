@@ -2704,9 +2704,6 @@ app.patch("/roles/:id", requireAdmin, async (req, res) => {
 app.delete("/roles/:id", requireAdmin, async (req, res) => {
   try {
     const r = await teamRole.findById(req.params.id);
-<<<<<<< Updated upstream
-    
-=======
     if (!r) return res.status(404).json({ message: "Role not found" });
     if (r.isSystem) return res.status(400).json({ message: "Owner, Admin and Worker are built in and can't be deleted" });
     if (!canManageRank(req, r.rank)) return res.status(403).json({ message: "You don't have authority over this role" });
@@ -2844,4 +2841,3 @@ module.exports = app;
 if (require.main === module) {
   app.listen(port, () => console.log(`Listening on port ${port}`));
 }
->>>>>>> Stashed changes
