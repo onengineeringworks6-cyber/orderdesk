@@ -4,6 +4,7 @@ const mongoose = require('mongoose');
 const path = require('path');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
 // =====================================================
 
 // ================ BASIC APP ==========================
@@ -140,6 +141,12 @@ function canManageRank(req, targetRank) {
 
 // Require a valid login token on every route this runs before.
 async function requireAuth(req, res, next) {
+  // Public, no-login order tracking links (/public/orders/:token) stay
+  // open to anyone with the link — same principle as a courier tracking
+  // page. They never touch req.user and the route itself only returns
+  // non-financial fields.
+  if (req.path.startsWith("/public/")) return next();
+
   const header = req.headers.authorization || "";
   const token = header.startsWith("Bearer ") ? header.slice(7) : null;
   if (!token) {
@@ -203,6 +210,54 @@ function stripFinancials(orderDoc) {
   const { TotalValue, Advance, RemainingPayment, EstimatedCost, PurchaseCost, AdvanceHistory, History, Expenses, ...safe } = o;
   return safe;
 }
+
+//..........................ACTIVITY LOG (audit trail, admin-viewable)........
+// A simple, append-only record of who did what and when, across the whole
+// app — separate from each order's own History (which only covers that one
+// order). Capped so it can't grow forever.
+const activityLog = mongoose.model("ActivityLog", new mongoose.Schema({
+  userId: { type: String, default: "" },
+  username: { type: String, default: "system" },
+  roleName: { type: String, default: "" },
+  action: { type: String, required: true },   // short machine tag, e.g. "order.created"
+  detail: { type: String, required: true },   // human-readable line
+  date: { type: String, required: true }
+}));
+const ACTIVITY_LOG_CAP = 2000;
+
+// Fire-and-forget — logging must never block or break the request it's
+// attached to, so every failure is swallowed.
+function logActivity(req, action, detail) {
+  try {
+    const entry = {
+      userId: req && req.user ? req.user.id : "",
+      username: req && req.user ? req.user.username : "system",
+      roleName: req && req.user ? req.user.roleName : "",
+      action,
+      detail,
+      date: new Date().toISOString()
+    };
+    activityLog.create(entry).then(async () => {
+      const count = await activityLog.countDocuments();
+      if (count > ACTIVITY_LOG_CAP) {
+        const toTrim = await activityLog.find({}).sort({ date: 1 }).limit(count - ACTIVITY_LOG_CAP).select("_id");
+        await activityLog.deleteMany({ _id: { $in: toTrim.map(t => t._id) } });
+      }
+    }).catch(err => console.error("Activity log write failed:", err.message));
+  } catch (err) {
+    console.error("Activity log failed:", err.message);
+  }
+}
+
+app.get("/activity", requireAdmin, async (req, res) => {
+  try {
+    const limit = Math.min(Number(req.query.limit) || 200, 500);
+    const all = await activityLog.find({}).sort({ date: -1 }).limit(limit);
+    res.status(200).json(all);
+  } catch (error) {
+    res.status(500).json({ message: "Error fetching activity log", error: error.message });
+  }
+});
 
 // USER SIGNUP — bootstrap-only: works once, to create your first (and only)
 // admin account, then locks itself automatically once any admin exists.
@@ -304,6 +359,11 @@ app.post('/login', async (req, res) => {
     // this response or the token — requireAuth re-checks from the DB.)
     let roleDoc = existingAdmin.RoleId ? await teamRole.findById(existingAdmin.RoleId) : null;
     if (!roleDoc) roleDoc = await teamRole.findOne({ name: role === "admin" ? "Admin" : "Worker" });
+
+    logActivity(
+      { user: { id: String(existingAdmin._id), username: existingAdmin.username, roleName: roleDoc ? roleDoc.name : role } },
+      "auth.login", `${existingAdmin.username} logged in`
+    );
 
     res.status(200).json({
       message: "Login successful",
@@ -421,6 +481,14 @@ const orders = mongoose.model("Orders", {
     default: null
   },
 
+  // How many units of Product this order consumes — deducted from the
+  // product's stock when the order is created, restored when it's deleted
+  // or the product link/quantity changes. Meaningless when Product is null.
+  Qty: {
+    type: Number,
+    default: 1
+  },
+
   // Which team member is responsible for this job. The name is stored too,
   // so it can be shown to workers (who can't load the team list).
   AssignedTo: {
@@ -485,6 +553,14 @@ const orders = mongoose.model("Orders", {
     amount: Number,
     date: String
   }],
+
+  // Random, unguessable token for the no-login client tracking link
+  // (/public/orders/:token). Generated once at creation and never reused.
+  PublicToken: {
+    type: String,
+    default: "",
+    index: true
+  },
 
   // Soft delete — "deleted" orders are hidden from normal views but kept
   // in the database so they can be restored from Recently Deleted.
@@ -563,7 +639,8 @@ app.post("/neworder", requireAdmin, async (req, res) => {
       EstimatedCost,
       PurchaseCost,
       ItemDetails,
-      AssignedTo
+      AssignedTo,
+      Qty
     } = req.body;
 
     // Optional: assign the job to a team member right away.
@@ -600,13 +677,19 @@ app.post("/neworder", requireAdmin, async (req, res) => {
     // Generate human-readable ID
     const OrderID = `${yearPrefix}${String(nextNum).padStart(4, "0")}`;
 
+    const linkedProduct = Product && Product.trim() ? Product : null;
+    let qtyNum = Number(Qty);
+    if (!Number.isFinite(qtyNum) || qtyNum <= 0) qtyNum = 1;
+
     const now = new Date().toISOString();
     const newOrder = new orders({
       OrderID,
       OrderName: (OrderName || "").trim() || OrderID,
       OrderType: type,
       Client,
-      Product: Product && Product.trim() ? Product : null,
+      PublicToken: crypto.randomBytes(16).toString("hex"),
+      Product: linkedProduct,
+      Qty: qtyNum,
       AssignedTo: assignedId,
       AssignedName: assignedName,
       ReceivingDate,
@@ -628,6 +711,8 @@ app.post("/neworder", requireAdmin, async (req, res) => {
     });
 
     await newOrder.save();
+    if (linkedProduct) await adjustStock(linkedProduct, -qtyNum);
+    logActivity(req, "order.created", `Created order ${OrderID} (${type}) for ${newOrder.OrderName}`);
 
     res.status(201).json({
       message: "Order created successfully",
@@ -678,11 +763,28 @@ app.patch('/orders/:id', requireAdmin, async (req, res) => {
       return res.status(404).json({ message: "Order not found" });
     }
 
-    const { OrderName, ReceivingDate, DeliveryDate, TotalValue, EstimatedCost, PurchaseCost, ItemDetails, Product } = req.body;
+    const { OrderName, ReceivingDate, DeliveryDate, TotalValue, EstimatedCost, PurchaseCost, ItemDetails, Product, Qty } = req.body;
     const changes = [];
 
+    // Stock sync: figure out old vs new (Product, Qty) and move the
+    // difference. Done as "restore old, then deduct new" so a product swap
+    // or a quantity change both settle correctly in one pass.
+    const oldProduct = order.Product ? String(order.Product) : null;
+    const oldQty = order.Qty || 1;
+    let newProduct = oldProduct;
     if (Product !== undefined) {
-      order.Product = Product && Product.trim() ? Product : null;
+      newProduct = Product && Product.trim() ? Product : null;
+      order.Product = newProduct;
+    }
+    let newQty = oldQty;
+    if (Qty !== undefined) {
+      const n = Number(Qty);
+      newQty = (Number.isFinite(n) && n > 0) ? n : 1;
+      order.Qty = newQty;
+    }
+    if (newProduct !== oldProduct || newQty !== oldQty) {
+      if (oldProduct) await adjustStock(oldProduct, oldQty);       // give back old
+      if (newProduct) await adjustStock(newProduct, -newQty);      // take new
     }
     if (OrderName !== undefined && OrderName.trim() && OrderName.trim() !== order.OrderName) {
       changes.push(`name → "${OrderName.trim()}"`);
@@ -719,6 +821,7 @@ app.patch('/orders/:id', requireAdmin, async (req, res) => {
     }
 
     await order.save();
+    if (changes.length) logActivity(req, "order.edited", `Edited order ${order.OrderID}: ${changes.join(", ")}`);
 
     res.status(200).json({ message: "Order updated", order });
   } catch (error) {
@@ -738,6 +841,8 @@ app.delete('/orders/:id', requireAdmin, async (req, res) => {
     order.DeletedAt = new Date().toISOString();
     order.History.push({ event: "Deleted", detail: "Order moved to Recently Deleted", date: order.DeletedAt });
     await order.save();
+    if (order.Product) await adjustStock(order.Product, order.Qty || 1); // give stock back
+    logActivity(req, "order.deleted", `Deleted order ${order.OrderID}`);
     res.status(200).json({ message: "Order deleted" });
   } catch (error) {
     res.status(500).json({ message: "Error deleting order", error: error.message });
@@ -755,6 +860,8 @@ app.post('/orders/:id/restore', requireAdmin, async (req, res) => {
     order.DeletedAt = null;
     order.History.push({ event: "Restored", detail: "Order restored from Recently Deleted", date: new Date().toISOString() });
     await order.save();
+    if (order.Product) await adjustStock(order.Product, -(order.Qty || 1)); // take stock again
+    logActivity(req, "order.restored", `Restored order ${order.OrderID}`);
     res.status(200).json({ message: "Order restored", order });
   } catch (error) {
     res.status(500).json({ message: "Error restoring order", error: error.message });
@@ -838,6 +945,7 @@ app.patch('/orders/:id/status', async (req, res) => {
     order.History.push({ event: "Status", detail, date: new Date().toISOString() });
 
     await order.save();
+    logActivity(req, "order.status", `${order.OrderID}: ${detail}`);
 
     res.status(200).json({ message: "Order updated", order: forRole(req, order) });
   } catch (error) {
@@ -1002,6 +1110,7 @@ app.patch("/roadmaps/:orderType", requireAdmin, async (req, res) => {
       { Stage: cleaned.length }
     );
 
+    logActivity(req, "roadmap.edited", `Updated ${orderType} roadmap (${cleaned.length} stages)`);
     res.status(200).json({ message: `${orderType} roadmap updated`, roadmap: r });
   } catch (error) {
     res.status(500).json({ message: "Error updating roadmap", error: error.message });
@@ -1055,6 +1164,53 @@ app.delete('/orders/:id/photos/:photoId', requireAdmin, async (req, res) => {
     res.status(200).json({ message: "Photo removed", order });
   } catch (error) {
     res.status(500).json({ message: "Error removing photo", error: error.message });
+  }
+});
+
+// GET (OR LAZILY CREATE) AN ORDER'S NO-LOGIN TRACKING LINK TOKEN
+// Older orders created before this feature existed won't have one yet —
+// generated here on first request instead of a one-off migration script.
+app.post('/orders/:id/public-link', requireAdmin, async (req, res) => {
+  try {
+    const order = await orders.findById(req.params.id);
+    if (!order) return res.status(404).json({ message: "Order not found" });
+    if (!order.PublicToken) {
+      order.PublicToken = crypto.randomBytes(16).toString("hex");
+      await order.save();
+    }
+    res.status(200).json({ token: order.PublicToken });
+  } catch (error) {
+    res.status(500).json({ message: "Error creating tracking link", error: error.message });
+  }
+});
+
+// PUBLIC, NO-LOGIN ORDER TRACKING — exempted from requireAuth above.
+// Returns only what a client should see: never money, never other orders,
+// never anything about who's working on it internally.
+app.get('/public/orders/:token', async (req, res) => {
+  try {
+    const order = await orders.findOne({ PublicToken: req.params.token, Deleted: { $ne: true } }).populate("Client", "name");
+    if (!order) return res.status(404).json({ message: "This tracking link is invalid or has expired." });
+
+    const stages = await stagesForType(order.OrderType);
+    res.status(200).json({
+      OrderID: order.OrderID,
+      OrderName: order.OrderName,
+      OrderType: order.OrderType,
+      ClientName: order.Client ? order.Client.name : "",
+      Status: order.Status,
+      Stage: order.Stage,
+      Stages: stages,
+      ReceivingDate: order.ReceivingDate,
+      DeliveryDate: order.DeliveryDate,
+      Photos: (order.Photos || []).map(p => ({ url: p.url, caption: p.caption, date: p.date })),
+      // Only non-money history events, in client-friendly language.
+      Updates: (order.History || [])
+        .filter(h => ["Created", "Status", "Photo"].includes(h.event))
+        .map(h => ({ detail: h.detail, date: h.date }))
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Error loading tracking info", error: error.message });
   }
 });
 
@@ -1130,6 +1286,7 @@ app.post("/newclient", requireAdmin, async (req, res) => {
     });
 
     await newClient.save();
+    logActivity(req, "client.created", `Added client ${newClient.name}`);
 
     res.status(201).json({
       message: "Client created successfully",
@@ -1354,6 +1511,25 @@ const product = mongoose.model("Product", {
   Photo: {
     type: String,
     default: ""
+  },
+
+  // Inventory — units currently on hand. Deducted automatically when an
+  // order links this product (by its Qty), restored if that order is
+  // deleted or its Product/Qty changes. Also adjustable directly (restock).
+  stock: {
+    type: Number,
+    default: 0
+  },
+  unit: {
+    type: String,
+    trim: true,
+    default: "pcs"
+  },
+  // Dashboard/Products page flags this product as low stock once `stock`
+  // falls at or below this number. 0 = no alert.
+  lowStockAlert: {
+    type: Number,
+    default: 0
   }
 
 });
@@ -1364,12 +1540,24 @@ function validPhoto(url) {
   return typeof url === "string" && PHOTO_RE.test(url) && url.length <= 1_800_000;
 }
 
+// Adjust a product's stock by `delta` (positive = add, negative = deduct).
+// Silently no-ops if productId is missing/invalid — stock tracking should
+// never block an order from being saved.
+async function adjustStock(productId, delta) {
+  if (!productId || !delta || !mongoose.isValidObjectId(productId)) return;
+  try {
+    await product.findByIdAndUpdate(productId, { $inc: { stock: delta } });
+  } catch (e) {
+    console.error("Stock adjust failed:", e.message);
+  }
+}
+
 // ADDING NEW PRODUCT
 app.post("/addproduct", requireAdmin, async (req, res) => {
 
   try {
 
-    const { name, desc, category, Photo } = req.body;
+    const { name, desc, category, Photo, stock, unit, lowStockAlert } = req.body;
 
     // Required field validation
     if (!name || !desc || !category) {
@@ -1379,6 +1567,14 @@ app.post("/addproduct", requireAdmin, async (req, res) => {
     }
     if (!validPhoto(Photo)) {
       return res.status(400).json({ message: "Photo is invalid or too large — please retake it and try again" });
+    }
+    const stockNum = stock === undefined || stock === "" ? 0 : Number(stock);
+    const lowNum = lowStockAlert === undefined || lowStockAlert === "" ? 0 : Number(lowStockAlert);
+    if (!Number.isFinite(stockNum) || stockNum < 0) {
+      return res.status(400).json({ message: "Stock must be a valid, non-negative number" });
+    }
+    if (!Number.isFinite(lowNum) || lowNum < 0) {
+      return res.status(400).json({ message: "Low stock alert must be a valid, non-negative number" });
     }
 
     // Generate Product ID — always from the highest existing number,
@@ -1398,11 +1594,15 @@ app.post("/addproduct", requireAdmin, async (req, res) => {
       name,
       desc,
       category,
-      Photo: Photo || ""
+      Photo: Photo || "",
+      stock: stockNum,
+      unit: (unit || "pcs").trim() || "pcs",
+      lowStockAlert: lowNum
 
     });
 
     await newProduct.save();
+    logActivity(req, "product.created", `Added product ${newProduct.name}`);
 
     res.status(201).json({
 
@@ -1432,7 +1632,7 @@ app.patch("/products/:id", requireAdmin, async (req, res) => {
       return res.status(404).json({ message: "Product not found" });
     }
 
-    const { name, desc, category, Photo } = req.body;
+    const { name, desc, category, Photo, stock, unit, lowStockAlert } = req.body;
     if (name !== undefined) {
       if (!name.trim()) return res.status(400).json({ message: "Name is required" });
       p.name = name.trim();
@@ -1450,6 +1650,19 @@ app.patch("/products/:id", requireAdmin, async (req, res) => {
         return res.status(400).json({ message: "Photo is invalid or too large — please retake it and try again" });
       }
       p.Photo = Photo || "";
+    }
+    if (stock !== undefined) {
+      const n = Number(stock);
+      if (!Number.isFinite(n) || n < 0) return res.status(400).json({ message: "Stock must be a valid, non-negative number" });
+      p.stock = n;
+    }
+    if (unit !== undefined) {
+      p.unit = (unit || "pcs").trim() || "pcs";
+    }
+    if (lowStockAlert !== undefined) {
+      const n = Number(lowStockAlert);
+      if (!Number.isFinite(n) || n < 0) return res.status(400).json({ message: "Low stock alert must be a valid, non-negative number" });
+      p.lowStockAlert = n;
     }
 
     await p.save();
@@ -1473,6 +1686,107 @@ app.get("/products", async (req, res) => {
       error: error.message
     });
 
+  }
+});
+
+//..........................EXPENSES (general business overhead).........................
+// General, non-order-specific business expenses — rent, salaries, utilities,
+// tools, marketing, etc. (Order-specific costs already live on each order's
+// own Expenses sub-array.) Used by the dashboard to compute real profit
+// (revenue generated minus every expense, order-level and general).
+const expense = mongoose.model("Expense", {
+  ExpenseID: { type: String, required: true, unique: true },
+  label: { type: String, required: true, trim: true },
+  amount: { type: Number, required: true },
+  category: { type: String, trim: true, default: "General" },
+  date: { type: String, required: true },
+  notes: { type: String, trim: true, default: "" }
+});
+
+// Money data — same access rule as order financials: admins and anyone
+// granted viewFinancials on a custom role can read; only admins can write.
+function requireViewFinancials(req, res, next) {
+  if (req.user.role === "admin" || (req.user.perms && req.user.perms.viewFinancials)) return next();
+  return res.status(403).json({ message: "You don't have permission to view financial data" });
+}
+
+app.get("/expenses", requireViewFinancials, async (req, res) => {
+  try {
+    const all = await expense.find({}).sort({ date: -1 });
+    res.status(200).json(all);
+  } catch (error) {
+    res.status(500).json({ message: "Error fetching expenses", error: error.message });
+  }
+});
+
+app.post("/expenses", requireAdmin, async (req, res) => {
+  try {
+    const { label, amount, category, date, notes } = req.body;
+    if (!label || !label.trim()) return res.status(400).json({ message: "A label is required" });
+    const amt = Number(amount);
+    if (!Number.isFinite(amt) || amt <= 0) return res.status(400).json({ message: "Enter a valid amount" });
+    if (!date) return res.status(400).json({ message: "A date is required" });
+
+    const prefix = "EXP-";
+    const latest = await expense.findOne({ ExpenseID: { $regex: `^${prefix}` } }).sort({ ExpenseID: -1 });
+    let num = 1;
+    if (latest) {
+      const n = parseInt(latest.ExpenseID.slice(prefix.length), 10);
+      if (!isNaN(n)) num = n + 1;
+    }
+    const ExpenseID = `${prefix}${String(num).padStart(4, "0")}`;
+
+    const newExpense = new expense({
+      ExpenseID,
+      label: label.trim(),
+      amount: amt,
+      category: (category || "General").trim() || "General",
+      date,
+      notes: (notes || "").trim()
+    });
+    await newExpense.save();
+    logActivity(req, "expense.created", `Added expense "${newExpense.label}" (₹${amt})`);
+
+    res.status(201).json({ message: "Expense added", expense: newExpense });
+  } catch (error) {
+    res.status(500).json({ message: "Error adding expense", error: error.message });
+  }
+});
+
+app.patch("/expenses/:id", requireAdmin, async (req, res) => {
+  try {
+    const e = await expense.findById(req.params.id);
+    if (!e) return res.status(404).json({ message: "Expense not found" });
+
+    const { label, amount, category, date, notes } = req.body;
+    if (label !== undefined) {
+      if (!label.trim()) return res.status(400).json({ message: "A label is required" });
+      e.label = label.trim();
+    }
+    if (amount !== undefined) {
+      const amt = Number(amount);
+      if (!Number.isFinite(amt) || amt <= 0) return res.status(400).json({ message: "Enter a valid amount" });
+      e.amount = amt;
+    }
+    if (category !== undefined) e.category = (category || "General").trim() || "General";
+    if (date !== undefined) e.date = date;
+    if (notes !== undefined) e.notes = notes.trim();
+
+    await e.save();
+    res.status(200).json({ message: "Expense updated", expense: e });
+  } catch (error) {
+    res.status(500).json({ message: "Error updating expense", error: error.message });
+  }
+});
+
+app.delete("/expenses/:id", requireAdmin, async (req, res) => {
+  try {
+    const removed = await expense.findByIdAndDelete(req.params.id);
+    if (!removed) return res.status(404).json({ message: "Expense not found" });
+    logActivity(req, "expense.deleted", `Deleted expense "${removed.label}"`);
+    res.status(200).json({ message: "Expense deleted" });
+  } catch (error) {
+    res.status(500).json({ message: "Error deleting expense", error: error.message });
   }
 });
 
@@ -1570,6 +1884,7 @@ app.post("/quotes", requireAdmin, async (req, res) => {
       History: [{ event: "Created", detail: `Quotation created with ${items.length} item${items.length === 1 ? "" : "s"}, total ₹${amt}`, date: now }]
     });
     await newQuote.save();
+    logActivity(req, "quote.created", `Created quotation ${QuoteID} (₹${amt})`);
 
     res.status(201).json({ message: "Quotation created", quote: newQuote });
   } catch (error) {
@@ -1643,6 +1958,7 @@ app.post("/quotes/:id/send", requireAdmin, async (req, res) => {
     if (q.Status === "Draft") q.Status = "Sent";
     q.History.push({ event: "Sent", detail: "Quotation sent to client on WhatsApp", date: now });
     await q.save();
+    logActivity(req, "quote.sent", `Sent quotation ${q.QuoteID}`);
     res.status(200).json({ message: "Marked as sent", quote: q });
   } catch (error) {
     res.status(500).json({ message: "Error marking quotation sent", error: error.message });
@@ -1719,10 +2035,119 @@ app.post("/quotes/:id/convert", requireAdmin, async (req, res) => {
     q.ConvertedOrderId = newOrder._id;
     q.History.push({ event: "Converted", detail: `Converted to order ${OrderID}`, date: now });
     await q.save();
+    logActivity(req, "quote.converted", `Converted quotation ${q.QuoteID} to order ${OrderID}`);
 
     res.status(201).json({ message: "Quotation converted to order", order: newOrder, quote: q });
   } catch (error) {
     res.status(500).json({ message: "Error converting quotation", error: error.message });
+  }
+});
+
+//..........................INVOICES / GST BILLS (admin only).................
+// A formal bill generated against a specific order — separate from a
+// Quotation (which is given before work starts). Snapshots the client and
+// order details at the time it's generated so the invoice stays correct
+// even if the order or client is edited afterwards.
+const invoice = mongoose.model("Invoice", {
+  InvoiceID: { type: String, required: true, unique: true },
+  Order: { type: mongoose.Schema.Types.ObjectId, ref: "Orders", required: true },
+  Client: { type: mongoose.Schema.Types.ObjectId, ref: "Client", default: null },
+
+  ClientName: { type: String, trim: true, default: "" },
+  ClientAddress: { type: String, trim: true, default: "" },
+  ClientPhone: { type: String, trim: true, default: "" },
+  ClientGSTIN: { type: String, trim: true, default: "" },
+
+  OrderTitle: { type: String, trim: true, default: "" },
+  Description: { type: String, trim: true, default: "" },
+
+  Subtotal: { type: Number, required: true },
+  GSTEnabled: { type: Boolean, default: false },
+  GSTRate: { type: Number, default: 18 },        // combined %, split CGST+SGST below
+  CGST: { type: Number, default: 0 },
+  SGST: { type: Number, default: 0 },
+  GrandTotal: { type: Number, required: true },
+
+  Date: { type: String, required: true },
+  Notes: { type: String, trim: true, default: "" }
+});
+
+app.get("/invoices", requireViewFinancials, async (req, res) => {
+  try {
+    const all = await invoice.find({}).sort({ Date: -1 });
+    res.status(200).json(all);
+  } catch (error) {
+    res.status(500).json({ message: "Error fetching invoices", error: error.message });
+  }
+});
+
+app.post("/invoices", requireAdmin, async (req, res) => {
+  try {
+    const { OrderId, Subtotal, GSTEnabled, GSTRate, Date: invDate, Notes, Description } = req.body;
+
+    const order = await orders.findById(OrderId);
+    if (!order) return res.status(404).json({ message: "Order not found" });
+
+    const sub = Number(Subtotal);
+    if (!Number.isFinite(sub) || sub < 0) return res.status(400).json({ message: "Enter a valid subtotal" });
+
+    const gstOn = !!GSTEnabled;
+    let rate = Number(GSTRate);
+    if (!Number.isFinite(rate) || rate < 0) rate = 18;
+    const gstTotal = gstOn ? sub * rate / 100 : 0;
+    const cgst = gstTotal / 2, sgst = gstTotal / 2;
+    const grandTotal = sub + gstTotal;
+
+    let c = null;
+    if (order.Client) c = await client.findById(order.Client);
+
+    const prefix = "INV-";
+    const latest = await invoice.findOne({ InvoiceID: { $regex: `^${prefix}` } }).sort({ InvoiceID: -1 });
+    let num = 1;
+    if (latest) {
+      const n = parseInt(latest.InvoiceID.slice(prefix.length), 10);
+      if (!isNaN(n)) num = n + 1;
+    }
+    const InvoiceID = `${prefix}${String(num).padStart(4, "0")}`;
+
+    const newInvoice = new invoice({
+      InvoiceID,
+      Order: order._id,
+      Client: c ? c._id : null,
+      ClientName: c ? c.name : "",
+      ClientAddress: c ? c.Add : "",
+      ClientPhone: c ? c.Phone : "",
+      ClientGSTIN: (req.body.ClientGSTIN || "").trim(),
+      OrderTitle: order.OrderName || order.OrderID,
+      Description: (Description || "").trim() || order.ItemDetails || "",
+      Subtotal: sub,
+      GSTEnabled: gstOn,
+      GSTRate: rate,
+      CGST: cgst,
+      SGST: sgst,
+      GrandTotal: grandTotal,
+      Date: invDate || new Date().toISOString().slice(0, 10),
+      Notes: (Notes || "").trim()
+    });
+    await newInvoice.save();
+
+    order.History.push({ event: "Invoice", detail: `Invoice ${InvoiceID} generated (${gstOn ? 'incl. GST' : 'no GST'})`, date: new Date().toISOString() });
+    await order.save();
+    logActivity(req, "invoice.generated", `Generated invoice ${InvoiceID} for order ${order.OrderID} (₹${grandTotal})`);
+
+    res.status(201).json({ message: "Invoice generated", invoice: newInvoice });
+  } catch (error) {
+    res.status(500).json({ message: "Error generating invoice", error: error.message });
+  }
+});
+
+app.delete("/invoices/:id", requireAdmin, async (req, res) => {
+  try {
+    const removed = await invoice.findByIdAndDelete(req.params.id);
+    if (!removed) return res.status(404).json({ message: "Invoice not found" });
+    res.status(200).json({ message: "Invoice deleted" });
+  } catch (error) {
+    res.status(500).json({ message: "Error deleting invoice", error: error.message });
   }
 });
 
@@ -1873,6 +2298,7 @@ app.delete("/employees/:id/forever", requireAdmin, async (req, res) => {
       return res.status(404).json({ message: "Employee not found" });
     }
     await attendance.deleteMany({ Employee: req.params.id });
+    await shift.deleteMany({ Employee: req.params.id });
     res.status(200).json({ message: "Employee permanently deleted" });
   } catch (error) {
     res.status(500).json({ message: "Error deleting employee", error: error.message });
@@ -1937,6 +2363,137 @@ app.get("/attendance", requireAdmin, async (req, res) => {
     res.status(200).json(records);
   } catch (error) {
     res.status(500).json({ message: "Error fetching attendance", error: error.message });
+  }
+});
+
+//..........................SHIFT SCHEDULING (admin only)...................
+// Separate from Attendance (which only records Present/Absent/Half/Leave
+// after the fact) — this is a forward-looking schedule: who's working
+// which shift on which day. Shift *types* (Morning, Night, Off, etc.) are
+// admin-customizable, same spirit as the per-order-type roadmap.
+const shiftPreset = mongoose.model("ShiftPreset", new mongoose.Schema({
+  name: { type: String, required: true, trim: true },
+  start: { type: String, default: "" }, // "HH:MM", blank for an all-day/off preset
+  end: { type: String, default: "" },
+  color: { type: String, default: "#5d6a63" },
+  isOff: { type: Boolean, default: false } // marks a "day off" type preset
+}));
+const DEFAULT_SHIFT_PRESETS = [
+  { name: "Morning", start: "09:00", end: "17:00", color: "#2f6f4f" },
+  { name: "Evening", start: "14:00", end: "22:00", color: "#a86a1d" },
+  { name: "Night", start: "22:00", end: "06:00", color: "#3b4b9c" },
+  { name: "Off", start: "", end: "", color: "#8a938d", isOff: true }
+];
+async function ensureShiftPresets() {
+  const count = await shiftPreset.countDocuments();
+  if (count === 0) await shiftPreset.insertMany(DEFAULT_SHIFT_PRESETS);
+}
+ensureShiftPresets().catch(err => console.error("Could not seed shift presets:", err.message));
+
+// One shift assignment per employee per day (upsert, same pattern as attendance).
+const shift = mongoose.model("Shift", new mongoose.Schema({
+  Employee: { type: mongoose.Schema.Types.ObjectId, ref: "Employee", required: true },
+  Date: { type: String, required: true }, // YYYY-MM-DD
+  Preset: { type: mongoose.Schema.Types.ObjectId, ref: "ShiftPreset", default: null },
+  Label: { type: String, default: "" },   // snapshot of the preset's name at assignment time
+  Start: { type: String, default: "" },
+  End: { type: String, default: "" }
+}));
+
+app.get("/shift-presets", async (req, res) => {
+  try {
+    const all = await shiftPreset.find({}).sort({ isOff: 1, start: 1 });
+    res.status(200).json(all);
+  } catch (error) {
+    res.status(500).json({ message: "Error fetching shift types", error: error.message });
+  }
+});
+
+app.post("/shift-presets", requireAdmin, async (req, res) => {
+  try {
+    const { name, start, end, color, isOff } = req.body;
+    if (!name || !name.trim()) return res.status(400).json({ message: "A name is required" });
+    const p = new shiftPreset({ name: name.trim(), start: start || "", end: end || "", color: color || "#5d6a63", isOff: !!isOff });
+    await p.save();
+    logActivity(req, "shift.preset_created", `Added shift type "${p.name}"`);
+    res.status(201).json({ message: "Shift type added", preset: p });
+  } catch (error) {
+    res.status(500).json({ message: "Error adding shift type", error: error.message });
+  }
+});
+
+app.patch("/shift-presets/:id", requireAdmin, async (req, res) => {
+  try {
+    const p = await shiftPreset.findById(req.params.id);
+    if (!p) return res.status(404).json({ message: "Shift type not found" });
+    const { name, start, end, color, isOff } = req.body;
+    if (name !== undefined) {
+      if (!name.trim()) return res.status(400).json({ message: "A name is required" });
+      p.name = name.trim();
+    }
+    if (start !== undefined) p.start = start;
+    if (end !== undefined) p.end = end;
+    if (color !== undefined && color) p.color = color;
+    if (isOff !== undefined) p.isOff = !!isOff;
+    await p.save();
+    res.status(200).json({ message: "Shift type updated", preset: p });
+  } catch (error) {
+    res.status(500).json({ message: "Error updating shift type", error: error.message });
+  }
+});
+
+app.delete("/shift-presets/:id", requireAdmin, async (req, res) => {
+  try {
+    const removed = await shiftPreset.findByIdAndDelete(req.params.id);
+    if (!removed) return res.status(404).json({ message: "Shift type not found" });
+    await shift.deleteMany({ Preset: removed._id });
+    logActivity(req, "shift.preset_deleted", `Deleted shift type "${removed.name}"`);
+    res.status(200).json({ message: "Shift type deleted — any assignments using it were cleared" });
+  } catch (error) {
+    res.status(500).json({ message: "Error deleting shift type", error: error.message });
+  }
+});
+
+// GET THE SCHEDULE FOR A MONTH (all employees) — e.g. /shifts?month=2026-10
+app.get("/shifts", requireAdmin, async (req, res) => {
+  try {
+    const month = req.query.month;
+    if (!month || !/^\d{4}-\d{2}$/.test(month)) {
+      return res.status(400).json({ message: "month query param must be YYYY-MM" });
+    }
+    const records = await shift.find({ Date: { $regex: `^${month}` } });
+    res.status(200).json(records);
+  } catch (error) {
+    res.status(500).json({ message: "Error fetching shifts", error: error.message });
+  }
+});
+
+// ASSIGN (OR CLEAR) ONE EMPLOYEE'S SHIFT ON ONE DAY — upsert, same shape as attendance
+app.post("/shifts", requireAdmin, async (req, res) => {
+  try {
+    const { Employee, Date: dateStr, PresetId } = req.body;
+    if (!Employee || !mongoose.isValidObjectId(Employee)) {
+      return res.status(400).json({ message: "A valid employee is required" });
+    }
+    if (!dateStr || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+      return res.status(400).json({ message: "Date must be in YYYY-MM-DD format" });
+    }
+    if (!PresetId) {
+      // No preset = clear whatever was assigned that day.
+      await shift.deleteOne({ Employee, Date: dateStr });
+      return res.status(200).json({ message: "Shift cleared", record: null });
+    }
+    const preset = await shiftPreset.findById(PresetId);
+    if (!preset) return res.status(400).json({ message: "That shift type could not be found" });
+
+    const rec = await shift.findOneAndUpdate(
+      { Employee, Date: dateStr },
+      { Employee, Date: dateStr, Preset: preset._id, Label: preset.name, Start: preset.start, End: preset.end },
+      { new: true, upsert: true }
+    );
+    res.status(200).json({ message: "Shift assigned", record: rec });
+  } catch (error) {
+    res.status(500).json({ message: "Error assigning shift", error: error.message });
   }
 });
 
@@ -2053,6 +2610,7 @@ app.post("/roles", requireAdmin, async (req, res) => {
 
     const newRole = new teamRole({ name: trimmedName, color: color || randomRoleColor(), rank: rankNum, permissions: sanitizePerms(permissions), isSystem: false });
     await newRole.save();
+    logActivity(req, "role.created", `Created role "${trimmedName}" (rank ${rankNum})`);
     res.status(201).json({ message: "Role created", role: newRole });
   } catch (error) {
     res.status(500).json({ message: "Error creating role", error: error.message });
@@ -2092,6 +2650,7 @@ app.patch("/roles/:id", requireAdmin, async (req, res) => {
     if (permissions !== undefined) r.permissions = sanitizePerms(permissions);
 
     await r.save();
+    logActivity(req, "role.edited", `Edited role "${r.name}"`);
     res.status(200).json({ message: "Role updated", role: r });
   } catch (error) {
     res.status(500).json({ message: "Error updating role", error: error.message });
@@ -2102,136 +2661,4 @@ app.patch("/roles/:id", requireAdmin, async (req, res) => {
 app.delete("/roles/:id", requireAdmin, async (req, res) => {
   try {
     const r = await teamRole.findById(req.params.id);
-    if (!r) return res.status(404).json({ message: "Role not found" });
-    if (r.isSystem) return res.status(400).json({ message: "Owner, Admin and Worker are built in and can't be deleted" });
-    if (!canManageRank(req, r.rank)) return res.status(403).json({ message: "You don't have authority over this role" });
-
-    const workerRole = await teamRole.findOne({ name: "Worker" });
-    await admin.updateMany({ RoleId: r._id }, { RoleId: workerRole ? workerRole._id : null, role: "worker" });
-    await teamRole.findByIdAndDelete(r._id);
-    res.status(200).json({ message: "Role deleted — anyone who had it moved to Worker" });
-  } catch (error) {
-    res.status(500).json({ message: "Error deleting role", error: error.message });
-  }
-});
-
-//..........................TEAM (admin only).........................
-// LIST TEAM MEMBERS
-app.get("/team", requireAdmin, async (req, res) => {
-  try {
-    const team = await admin.find({}, "username role RoleId").populate("RoleId");
-    const shaped = team.map(u => ({
-      _id: u._id,
-      username: u.username,
-      role: u.role, // legacy admin/worker flag, kept for compatibility
-      RoleId: u.RoleId ? u.RoleId._id : null,
-      roleName: u.RoleId ? u.RoleId.name : (u.role === "admin" ? "Admin" : "Worker"),
-      roleColor: u.RoleId ? u.RoleId.color : "#5d6a63",
-      rank: u.RoleId ? u.RoleId.rank : (u.role === "admin" ? RANK.ADMIN : RANK.WORKER)
-    }));
-    res.status(200).json(shaped);
-  } catch (error) {
-    res.status(500).json({ message: "Error fetching team", error: error.message });
-  }
-});
-
-// ADD A TEAM MEMBER
-app.post("/team", requireAdmin, async (req, res) => {
-  try {
-    const { username, password, RoleId } = req.body;
-
-    if (!username || !username.trim() || !password || password.length < 6) {
-      return res.status(400).json({ message: "Username and a password of at least 6 characters are required" });
-    }
-
-    const existing = await admin.findOne({ username: username.trim() });
-    if (existing) {
-      return res.status(409).json({ message: "That username is already taken" });
-    }
-
-    const chosenRole = RoleId ? await teamRole.findById(RoleId) : await teamRole.findOne({ name: "Worker" });
-    if (!chosenRole) return res.status(400).json({ message: "That role could not be found" });
-    if (!canManageRank(req, chosenRole.rank)) {
-      return res.status(403).json({ message: "You can't grant a role with authority equal to or above your own" });
-    }
-
-    const hashed = await bcrypt.hash(password, 10);
-    const newMember = new admin({
-      username: username.trim(),
-      password: hashed,
-      role: chosenRole.rank >= RANK.ADMIN ? "admin" : "worker",
-      RoleId: chosenRole._id
-    });
-    await newMember.save();
-
-    res.status(201).json({
-      message: "Team member added",
-      member: { _id: newMember._id, username: newMember.username, role: newMember.role, RoleId: chosenRole._id, roleName: chosenRole.name, roleColor: chosenRole.color, rank: chosenRole.rank }
-    });
-  } catch (error) {
-    res.status(500).json({ message: "Error adding team member", error: error.message });
-  }
-});
-
-// CHANGE A TEAM MEMBER'S ROLE (promote/demote)
-app.patch("/team/:id", requireAdmin, async (req, res) => {
-  try {
-    const member = await admin.findById(req.params.id).populate("RoleId");
-    if (!member) return res.status(404).json({ message: "Team member not found" });
-
-    const currentRank = member.RoleId ? member.RoleId.rank : (member.role === "admin" ? RANK.ADMIN : RANK.WORKER);
-    if (!canManageRank(req, currentRank)) {
-      return res.status(403).json({ message: "You don't have authority over this team member" });
-    }
-
-    const { RoleId } = req.body;
-    if (!RoleId) return res.status(400).json({ message: "Pick a role" });
-    const newRole = await teamRole.findById(RoleId);
-    if (!newRole) return res.status(400).json({ message: "That role could not be found" });
-    if (!canManageRank(req, newRole.rank)) {
-      return res.status(403).json({ message: "You can't grant a role with authority equal to or above your own" });
-    }
-
-    member.RoleId = newRole._id;
-    member.role = newRole.rank >= RANK.ADMIN ? "admin" : "worker";
-    await member.save();
-
-    res.status(200).json({
-      message: `${member.username} is now ${newRole.name}`,
-      member: { _id: member._id, username: member.username, role: member.role, RoleId: newRole._id, roleName: newRole.name, roleColor: newRole.color, rank: newRole.rank }
-    });
-  } catch (error) {
-    res.status(500).json({ message: "Error updating team member", error: error.message });
-  }
-});
-
-// REMOVE A TEAM MEMBER
-app.delete("/team/:id", requireAdmin, async (req, res) => {
-  try {
-    if (req.params.id === req.user.id) {
-      return res.status(400).json({ message: "You can't remove your own account while logged in as it" });
-    }
-    const member = await admin.findById(req.params.id).populate("RoleId");
-    if (!member) {
-      return res.status(404).json({ message: "Team member not found" });
-    }
-    const currentRank = member.RoleId ? member.RoleId.rank : (member.role === "admin" ? RANK.ADMIN : RANK.WORKER);
-    if (!canManageRank(req, currentRank)) {
-      return res.status(403).json({ message: "You don't have authority to remove this team member" });
-    }
-    await admin.findByIdAndDelete(req.params.id);
-    res.status(200).json({ message: "Team member removed" });
-  } catch (error) {
-    res.status(500).json({ message: "Error removing team member", error: error.message });
-  }
-});
-
-app.get('/', (req, res) => {
-  res.send('Hello World!');
-});
-
-module.exports = app;
-
-if (require.main === module) {
-  app.listen(port, () => console.log(`Listening on port ${port}`));
-}
+    
