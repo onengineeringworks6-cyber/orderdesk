@@ -1619,9 +1619,6 @@ function editOrderForm(o) {
     const total = +d.TotalValue;
     if (total < o.Advance) throw new Error(`Total value can't be less than the ${money(o.Advance)} already received.`);
     if (d.DeliveryDate < d.ReceivingDate) throw new Error('Delivery date cannot be before the receiving date.');
-<<<<<<< Updated upstream
-  
-=======
     const r = await api(`/orders/${encodeURIComponent(o._id)}`, 'PATCH', {
       OrderName: d.OrderName, ReceivingDate: d.ReceivingDate, DeliveryDate: d.DeliveryDate, TotalValue: total,
       ItemDetails: d.ItemDetails, EstimatedCost: d.EstimatedCost, PurchaseCost: d.PurchaseCost, Product: d.Product, Qty: d.Qty
@@ -3195,4 +3192,3 @@ window.__odBooted = true;
 </script>
 </body>
 </html>
->>>>>>> Stashed changes
