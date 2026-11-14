@@ -15,10 +15,53 @@ app.use(express.static(path.join(__dirname, '..', 'static')));
 // =====================================================
 
 // DATABASE CONNECTION
-// NOTE: left exactly as you currently have it deployed, so this update doesn't
-// accidentally break your live site. Switching to an environment variable is
-// still worth doing later, but as its own separate, deliberate step.
-mongoose.connect(process.env.MONGO_URI || "mongodb+srv://onengineeringworks6:VAoDEw90cQoK36qT@cluster0.n5jpr.mongodb.net/?appName=Cluster0");
+// NOTE: the fallback address below is left exactly as you currently have it
+// deployed so this update doesn't break your live site. Moving it fully into
+// the MONGO_URI environment variable (and rotating the password) is still
+// worth doing as its own deliberate step.
+//
+// The connection is deliberately failure-tolerant: on Vercel, an unhandled
+// connection error used to crash the whole function ("500
+// FUNCTION_INVOCATION_FAILED" with no explanation). Now a failed connection
+// is caught, remembered, retried on the next request, and reported clearly.
+const MONGO_URI = process.env.MONGO_URI || "mongodb+srv://onengineeringworks6:VAoDEw90cQoK36qT@cluster0.n5jpr.mongodb.net/?appName=Cluster0";
+let dbPromise = null;
+let lastDbError = "";
+function connectDb() {
+  if (mongoose.connection.readyState === 1) return Promise.resolve();
+  if (!dbPromise) {
+    dbPromise = mongoose.connect(MONGO_URI, { serverSelectionTimeoutMS: 8000 })
+      .then(() => { lastDbError = ""; })
+      .catch(err => { lastDbError = err.message || String(err); dbPromise = null; throw err; });
+  }
+  return dbPromise;
+}
+mongoose.connection.on("disconnected", () => { dbPromise = null; });
+connectDb().catch(err => console.error("MongoDB connection failed:", String(err.message).replace(/mongodb(\+srv)?:\/\/\S+/gi, "[address hidden]")));
+
+// Last line of defence: log stray async errors instead of letting one of
+// them take the whole serverless function down.
+process.on("unhandledRejection", err => console.error("Unhandled rejection:", err && err.message ? err.message : err));
+
+// No-login status page: open /public/health in a browser to see whether the
+// server is up and whether it can reach the database (no secrets shown).
+app.get("/public/health", async (req, res) => {
+  let db = "connected";
+  try { await connectDb(); } catch (err) { db = "unreachable"; }
+  res.status(db === "connected" ? 200 : 503).json({
+    server: "ok",
+    database: db,
+    problem: db === "connected" ? undefined : (lastDbError || "unknown").replace(/mongodb(\+srv)?:\/\/\S+/gi, "[address hidden]")
+  });
+});
+
+// Every other API route needs the database. If it can't be reached, answer
+// quickly with a clear message instead of hanging and then failing with a 500.
+app.use((req, res, next) => {
+  connectDb().then(() => next()).catch(() => res.status(503).json({
+    message: "The database can't be reached right now. Check that your MongoDB cluster is running and that its address/password and network access settings are correct, then try again."
+  }));
+});
 
 // USER MODEL
 const admin = mongoose.model("Admin", {
@@ -2661,4 +2704,144 @@ app.patch("/roles/:id", requireAdmin, async (req, res) => {
 app.delete("/roles/:id", requireAdmin, async (req, res) => {
   try {
     const r = await teamRole.findById(req.params.id);
+<<<<<<< Updated upstream
     
+=======
+    if (!r) return res.status(404).json({ message: "Role not found" });
+    if (r.isSystem) return res.status(400).json({ message: "Owner, Admin and Worker are built in and can't be deleted" });
+    if (!canManageRank(req, r.rank)) return res.status(403).json({ message: "You don't have authority over this role" });
+
+    const workerRole = await teamRole.findOne({ name: "Worker" });
+    await admin.updateMany({ RoleId: r._id }, { RoleId: workerRole ? workerRole._id : null, role: "worker" });
+    await teamRole.findByIdAndDelete(r._id);
+    logActivity(req, "role.deleted", `Deleted role "${r.name}" — members moved to Worker`);
+    res.status(200).json({ message: "Role deleted — anyone who had it moved to Worker" });
+  } catch (error) {
+    res.status(500).json({ message: "Error deleting role", error: error.message });
+  }
+});
+
+//..........................TEAM (admin only).........................
+// LIST TEAM MEMBERS
+app.get("/team", requireAdmin, async (req, res) => {
+  try {
+    const team = await admin.find({}, "username role RoleId").populate("RoleId");
+    const shaped = team.map(u => ({
+      _id: u._id,
+      username: u.username,
+      role: u.role, // legacy admin/worker flag, kept for compatibility
+      RoleId: u.RoleId ? u.RoleId._id : null,
+      roleName: u.RoleId ? u.RoleId.name : (u.role === "admin" ? "Admin" : "Worker"),
+      roleColor: u.RoleId ? u.RoleId.color : "#5d6a63",
+      rank: u.RoleId ? u.RoleId.rank : (u.role === "admin" ? RANK.ADMIN : RANK.WORKER)
+    }));
+    res.status(200).json(shaped);
+  } catch (error) {
+    res.status(500).json({ message: "Error fetching team", error: error.message });
+  }
+});
+
+// ADD A TEAM MEMBER
+app.post("/team", requireAdmin, async (req, res) => {
+  try {
+    const { username, password, RoleId } = req.body;
+
+    if (!username || !username.trim() || !password || password.length < 6) {
+      return res.status(400).json({ message: "Username and a password of at least 6 characters are required" });
+    }
+
+    const existing = await admin.findOne({ username: username.trim() });
+    if (existing) {
+      return res.status(409).json({ message: "That username is already taken" });
+    }
+
+    const chosenRole = RoleId ? await teamRole.findById(RoleId) : await teamRole.findOne({ name: "Worker" });
+    if (!chosenRole) return res.status(400).json({ message: "That role could not be found" });
+    if (!canManageRank(req, chosenRole.rank)) {
+      return res.status(403).json({ message: "You can't grant a role with authority equal to or above your own" });
+    }
+
+    const hashed = await bcrypt.hash(password, 10);
+    const newMember = new admin({
+      username: username.trim(),
+      password: hashed,
+      role: chosenRole.rank >= RANK.ADMIN ? "admin" : "worker",
+      RoleId: chosenRole._id
+    });
+    await newMember.save();
+    logActivity(req, "team.added", `Added team member ${newMember.username} as ${chosenRole.name}`);
+
+    res.status(201).json({
+      message: "Team member added",
+      member: { _id: newMember._id, username: newMember.username, role: newMember.role, RoleId: chosenRole._id, roleName: chosenRole.name, roleColor: chosenRole.color, rank: chosenRole.rank }
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Error adding team member", error: error.message });
+  }
+});
+
+// CHANGE A TEAM MEMBER'S ROLE (promote/demote)
+app.patch("/team/:id", requireAdmin, async (req, res) => {
+  try {
+    const member = await admin.findById(req.params.id).populate("RoleId");
+    if (!member) return res.status(404).json({ message: "Team member not found" });
+
+    const currentRank = member.RoleId ? member.RoleId.rank : (member.role === "admin" ? RANK.ADMIN : RANK.WORKER);
+    if (!canManageRank(req, currentRank)) {
+      return res.status(403).json({ message: "You don't have authority over this team member" });
+    }
+
+    const { RoleId } = req.body;
+    if (!RoleId) return res.status(400).json({ message: "Pick a role" });
+    const newRole = await teamRole.findById(RoleId);
+    if (!newRole) return res.status(400).json({ message: "That role could not be found" });
+    if (!canManageRank(req, newRole.rank)) {
+      return res.status(403).json({ message: "You can't grant a role with authority equal to or above your own" });
+    }
+
+    member.RoleId = newRole._id;
+    member.role = newRole.rank >= RANK.ADMIN ? "admin" : "worker";
+    await member.save();
+    logActivity(req, "team.role_changed", `Changed ${member.username}'s role to ${newRole.name}`);
+
+    res.status(200).json({
+      message: `${member.username} is now ${newRole.name}`,
+      member: { _id: member._id, username: member.username, role: member.role, RoleId: newRole._id, roleName: newRole.name, roleColor: newRole.color, rank: newRole.rank }
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Error updating team member", error: error.message });
+  }
+});
+
+// REMOVE A TEAM MEMBER
+app.delete("/team/:id", requireAdmin, async (req, res) => {
+  try {
+    if (req.params.id === req.user.id) {
+      return res.status(400).json({ message: "You can't remove your own account while logged in as it" });
+    }
+    const member = await admin.findById(req.params.id).populate("RoleId");
+    if (!member) {
+      return res.status(404).json({ message: "Team member not found" });
+    }
+    const currentRank = member.RoleId ? member.RoleId.rank : (member.role === "admin" ? RANK.ADMIN : RANK.WORKER);
+    if (!canManageRank(req, currentRank)) {
+      return res.status(403).json({ message: "You don't have authority to remove this team member" });
+    }
+    await admin.findByIdAndDelete(req.params.id);
+    logActivity(req, "team.removed", `Removed team member ${member.username}`);
+    res.status(200).json({ message: "Team member removed" });
+  } catch (error) {
+    res.status(500).json({ message: "Error removing team member", error: error.message });
+  }
+});
+
+app.get('/', (req, res) => {
+  res.send('Hello World!');
+});
+
+module.exports = app;
+
+if (require.main === module) {
+  app.listen(port, () => console.log(`Listening on port ${port}`));
+}
+>>>>>>> Stashed changes
